@@ -24,7 +24,7 @@ Platforms: macOS and Linux. Windows is out of scope (process-group semantics, §
 
 Decisions:
 - **The orchestrator is a separate long-lived Node process**, started next to Next.js by `scripts/launch.mjs` (`npm start`). Next.js route handlers are request-scoped and restart on HMR; child processes spawned there would be orphaned and module state lost. Next.js never spawns `claude`.
-- **The database is the only channel between the two processes.** Next.js writes user actions (and enqueues jobs in the same transaction via `lib/domain`); the orchestrator polls `jobs` every 1 s. Next.js also calls `POST /control/wake` and `/control/kill` on the orchestrator (admin token from `~/.slackboard/control.token`, mode 0600) for low latency; the 1 s poll is the fallback.
+- **The database is the only channel between the two processes.** Next.js writes user actions (and enqueues jobs in the same transaction via `lib/domain`); the orchestrator polls `jobs` every 1 s. Next.js also calls `POST /control/wake`, `/control/kill` and `/control/cancel {job_id}` on the orchestrator (admin token from `~/.slackboard/control.token`, mode 0600) for low latency only; the 1 s poll is the fallback. Next.js never moves a `running` job: to stop one it sets `jobs.cancel_requested = 1` in its txn and the orchestrator kills the child and finishes the row (J16/J17).
 - **Live UI:** `GET /api/stream?after=<eventId>` (SSE, `runtime='nodejs'`, `dynamic='force-dynamic'`) polls `events` by id every 250 ms. Zustand applies events; on reconnect the client resumes from its last id.
 - **Localhost only:** Next.js runs `next start -H 127.0.0.1`; middleware rejects any `Host` other than `127.0.0.1:<port>` / `localhost:<port>` (DNS rebinding) and any mutating request whose `Origin` differs or lacks the `sb_session` cookie (random 32 bytes, issued on page load, `HttpOnly; SameSite=Strict`). The tool server binds `127.0.0.1` and rejects non-loopback peers.
 - **Data dir** `~/.slackboard/` (outside the repo, so the repo's `CLAUDE.md` and `.claude/` never load into agent runs).
@@ -36,11 +36,12 @@ Decisions:
 | `POST /api/messages` | user message; enqueue wake jobs (§5.1) |
 | `POST /api/tasks` | user-created task (`todo`, no approval) |
 | `POST /api/tasks/:id` `{action: cancel\|reopen\|unblock\|accept\|move, note?}` | user transitions (§3.1, actor=user) |
-| `POST /api/tasks/unblock-killed` | "Retry all" after kill: T16 for every `blocked/killed` task, one txn |
-| `POST /api/jobs/:id` `{action: cancel}` | user cancels a job (J4 queued / J17 running) |
+| `POST /api/tasks/unblock-killed` | "Retry all" after kill: T16 for every `blocked/killed` task, one txn (each task goes to `in_review` or `todo` by the T16 resume rule) |
+| `POST /api/jobs/:id` `{action: cancel\|retry_now}` | `cancel`: queued → J4 directly; running → set `cancel_requested = 1` + `/control/cancel` (orchestrator applies J17). `retry_now`: queued job with `attempts > 0` → `run_after = now` (no state change; else `409 not_retrying`) |
+| `POST /api/pause` `{action: resume\|hold}` | `resume`: `paused_until = NULL, pause_reason = NULL`; `hold`: `paused_until = NULL, pause_reason = 'user'` (no expiry, until `resume`). Event `settings.changed {pause}` |
 | `GET /api/jobs/:id/log` | read-only: last 200 transcript lines from `stdout.jsonl`, `failure_kind`, `error`, `exit_code` |
 | `POST /api/approvals/:id/decide` `{decision, note}` | the only writer of approval decisions |
-| `POST /api/threads/:id` `{action: close\|reopen\|raise_cap}` | thread lifecycle (§3.3) |
+| `POST /api/threads/:id` `{action: close\|reopen\|raise_cap}` | thread lifecycle (§3.3); `reopen`/`raise_cap` apply the thread resume rule and return `{resumed: {task_id, kind} \| null}` |
 | `POST /api/kill`, `POST /api/resume` | kill switch (§5.9) |
 | `PUT /api/budgets` `{day_usd, day_jobs, jobs_5h, max_concurrency}` | budget/cap edits (user only; Settings, UX.md §12); event `settings.changed {old, new}` |
 | `PUT /api/agents/:id` `{enabled}` | enable/disable an agent (Settings) |
@@ -216,7 +217,7 @@ WHEN OLD.status <> NEW.status AND (OLD.status || '>' || NEW.status) NOT IN (
   'todo>in_progress','todo>blocked','todo>cancelled',
   'in_progress>in_review','in_progress>todo','in_progress>blocked','in_progress>cancelled',
   'in_review>done','in_review>todo','in_review>blocked','in_review>cancelled',
-  'blocked>todo','blocked>cancelled',
+  'blocked>todo','blocked>in_review','blocked>cancelled',
   'done>todo')
 BEGIN SELECT RAISE(ABORT, 'illegal_task_transition'); END;
 
@@ -281,6 +282,7 @@ CREATE TABLE jobs (
   last_output_at      INTEGER,
   pid                 INTEGER,                       -- also the process-group id (detached spawn)
   run_token_hash      TEXT,                          -- sha256 hex; NULL when not running
+  cancel_requested    INTEGER NOT NULL DEFAULT 0 CHECK (cancel_requested IN (0,1)),  -- set by Next.js; only the orchestrator finishes the row (J16/J17)
   budget_cap_usd      REAL NOT NULL CHECK (budget_cap_usd > 0 AND budget_cap_usd <= 5),  -- set at enqueue from §6.1 (role, kind); passed as --max-budget-usd
   budget_reserved_usd REAL NOT NULL DEFAULT 0 CHECK (budget_reserved_usd >= 0),
   cost_usd            REAL NOT NULL DEFAULT 0 CHECK (cost_usd >= 0),   -- sum over attempts, estimate
@@ -422,7 +424,10 @@ CREATE TABLE system_state (
   claude_version            TEXT,
   doctor_ok_at              INTEGER,
   doctor_report             TEXT CHECK (doctor_report IS NULL OR json_valid(doctor_report)),
-  CHECK ((kill_switch = 1) = (kill_engaged_at IS NOT NULL))
+  CHECK ((kill_switch = 1) = (kill_engaged_at IS NOT NULL)),
+  -- 'usage_limit' pauses until paused_until; 'user' ("Keep paused") pauses with no expiry until POST /api/pause resume
+  CHECK (pause_reason IS NOT 'usage_limit' OR paused_until IS NOT NULL),
+  CHECK (pause_reason IS NOT 'user' OR paused_until IS NULL)
 ) STRICT;
 INSERT INTO system_state(id) VALUES (1);
 
@@ -472,17 +477,17 @@ Guards are enforced in `lib/domain` inside one `BEGIN IMMEDIATE` transaction; th
 | T8 | in_progress | `update_task submit_for_review` (worker) | in_review | caller = claimant; `review_round < 2`; workspace has changes vs last head | capture artifact (§5.11); `review_round += 1`; clear claim; enqueue director `review` |
 | T9 | in_progress | job attempt failed, retryable / claim expired | todo | attempts < max | clear claim; job requeued with backoff |
 | T10 | in_progress, in_review | job failed terminally / `no_handoff` twice / `review` job failed `workspace_drift` (§5.11) | blocked (`job_failed`) | — | clear claim; Needs-you failure |
-| T11 | in_progress | worker job ends after a `request_help` in that job | blocked (`help`) | — | clear claim; help message already posted; director `help` job enqueued at call time |
+| T11 | in_progress | worker job ends after a `request_help` in that job | blocked (`help`) | — | clear claim; help message already posted at call time; director `help` job enqueued **here**, in the same `finishAttempt` txn (never at call time, so the director cannot answer while the work job still runs) |
 | T12 | in_progress, todo | `update_task block` (assignee) | blocked (`agent_blocked`) | note required | clear claim; Needs-you failure |
 | T13 | in_review | `update_task approve` (director, `review` job for this task) | done | caller ≠ author of the round (worker); artifact for current round exists; workspace `git status --porcelain` empty **and** `rev-parse HEAD` = that artifact's `head_commit` (else `rejected: workspace_drift`, review job fails → T10) | artifact verdict; director's user-facing summary allowed; Needs-you `ready` (top-level only); if all subtasks of parent done, post to parent thread |
 | T14 | in_review | `update_task request_changes` (director) | todo | note required; `review_round < 2` | artifact verdict; feedback as `review` message + note; enqueue `work` |
 | T15 | in_review | `request_changes` (director) | blocked (`review_cap`) | `review_round = 2` | Needs-you `review_cap` "Review limit reached" (user: Send back with note = T16, or Cancel = T17; no accept-anyway, PRD §6) |
-| T16 | blocked | unblock or user reply in the task thread (user); director `post_message` with `wake` to worker on a `help`-blocked task; "Retry all" after kill (user, every `blocked/killed` task in one txn) | todo | director only for reason `help`; note required for reason `review_cap` | `review_round = 0` if reason `review_cap`; enqueue `work` |
-| T17 | any non-terminal | cancel (user; director for tasks it created) | cancelled | — | kill running job for task (`cancelled`); cancel queued jobs |
-| T18 | done | reopen with note (user) | todo | — | `accepted_at = NULL`, `review_round = 0`; note; enqueue `work` |
+| T16 | blocked | unblock or user reply in the task thread (user); director `post_message` with `wake` to worker on a `help`-blocked task; "Retry all" after kill (user, every `blocked/killed` task in one txn) | in_review **or** todo (resume rule) | director only for reason `help`; note required for reason `review_cap`. **Resume rule** (evaluated before any reset): if an artifact for the current `review_round` exists with `verdict IS NULL` **and** the workspace is clean with `HEAD` = its `head_commit` → `in_review` + enqueue director `review`; otherwise → `todo` + enqueue `work` | `review_round = 0` if reason `review_cap` (its round-2 artifact has a verdict, so always → todo) |
+| T17 | any non-terminal | cancel (user; director for tasks it created) | cancelled | — | clear claim; cancel queued jobs (J4); set `cancel_requested = 1` on its running job (orchestrator kills it → J16); thread → closed |
+| T18 | done | reopen with note (user) | todo | — | `accepted_at = NULL`, `review_round = 0`; note; if the thread is `closed`, reopen it in the same txn (`status = 'open'`, or `'capped'` if a count is at its cap; `closed_at = NULL`); enqueue `work` |
 | T19 | done | accept (user) | done | top-level | `accepted_at = now`; close thread |
-| T20 | in_progress | kill switch | blocked (`killed`) | — | clear claim |
-| T21 | in_progress, in_review | user cancels the task's running `work`/`review` job (J17) | blocked (`user`) | — | clear claim; no Needs-you item (user acted) |
+| T20 | in_progress, in_review | kill switch kills the task's running `work`/`review` job (J15) | blocked (`killed`) | — | clear claim. Retry (T16) returns an `in_review` task to `in_review` + `review` by the resume rule |
+| T21 | in_progress, in_review | orchestrator finishes the task's running `work`/`review` job as J17 (user "Cancel job") | blocked (`user`) | — | clear claim; no Needs-you item (user acted); Retry (T16) follows the resume rule |
 
 User-allowed moves on the board: T16, T17, T18, T19 only. Users cannot move `in_review → done` (review cannot be skipped); they can Reopen after Done.
 
@@ -503,13 +508,13 @@ User-allowed moves on the board: T16, T17, T18, T19 only. Users cannot move `in_
 | J11 | running | `error_during_execution`, exit ≠ 0 with no result, `no_result`, `timeout_*`, `lease_lost`, `orphaned` | queued | `attempts < max_attempts` | `run_after = now + backoff` (§5.6); T9 |
 | J12 | running | as J11 | failed | `attempts = max_attempts` | T10 (`work`/`review`); system message (`respond`/`help`) |
 | J13 | running | init shows Slackboard MCP not connected or tools missing | failed (`mcp_not_connected`/`tools_missing`) | — | no retry; agents disabled until `doctor` passes |
-| J14 | running | usage limit suspected (§5.6) | queued (`usage_limit`) | — | `attempts -= 1`; `system_state.paused_until = now+30min` |
-| J15 | running | kill switch | killed | — | SIGTERM → SIGKILL group; T20 |
-| J16 | running | task cancelled (user) | cancelled | — | kill group |
-| J17 | running | user "Cancel job" (`POST /api/jobs/:id`) | cancelled | — | kill group; T21 for `work`/`review` |
+| J14 | running | usage limit suspected (§5.6) | queued (`usage_limit`) | — | `attempts -= 1`; unless `pause_reason = 'user'`: `paused_until = now+30min, pause_reason = 'usage_limit'` |
+| J15 | running | kill switch | killed | — | SIGTERM → SIGKILL group; T20 for `work`/`review` |
+| J16 | running | child killed `killedFor='cancelled'` and its task is `cancelled` (T17) | cancelled | orchestrator only (`finishAttempt`) | — (task already cancelled) |
+| J17 | running | child killed `killedFor='cancelled'` because `cancel_requested = 1` (user "Cancel job", `POST /api/jobs/:id`), task not cancelled | cancelled | orchestrator only (`finishAttempt`) | T21 for `work`/`review` |
 | J18 | running / claimed `review` | workspace dirty or `HEAD` ≠ current-round `head_commit` (pre-spawn check, or `approve` rejected `workspace_drift`) | failed (`workspace_drift`) | — | no retry; T10 |
 
-`finishAttempt` order: if the `work` job called `request_help` (in `tool_calls`), apply T11 first and classify J5; only then test J6/J7. `finishAttempt` normalises any unknown `result.subtype` to `error_during_execution`, and every update it makes is guarded `WHERE id=:id AND status='running' AND lease_owner=:me` (0 rows → another owner recovered it; do nothing).
+`finishAttempt` order: if the `work` job called `request_help` (in `tool_calls`), apply T11 first and classify J5; only then test J6/J7. `finishAttempt` normalises any unknown `result.subtype` to `error_during_execution`. If the row has `cancel_requested = 1`, any requeue outcome (J6, J8, J11, J14) becomes J16/J17 instead. Signature `finishAttempt(job, outcome, expectedOwner = ME)`: every update it makes is guarded `WHERE id=:id AND status='running' AND lease_owner=:expectedOwner` (0 rows → another owner recovered it; do nothing). The child `close` handler uses the default `ME`; `recoverOrphans` (§5.7) and `sweep` (§5.4) pass the row's own `j.lease_owner`, so rows owned by a dead orchestrator are recovered.
 
 All terminal transitions: revoke token (`run_token_hash = NULL`), clear lease, `finished_at`, `job.finished` and `job.attempt_finished {cost_usd, num_turns, subtype}` events, update agent presence. Requeue (J6, J8, J11, J14): if another queued job exists for (agent, thread, kind), **cancel that other job** (`failure_kind = 'cancelled'`), add its `trigger_count` to the retrying job, then flip the retrying job to `queued`, keeping its id, `attempts`, `continuations` and `session_id` (so §5.10 idempotency, the attempt bound and `--resume` hold).
 
@@ -518,9 +523,11 @@ All terminal transitions: revoke token (`run_token_hash = NULL`), clear lease, `
 | From | Event | To | Side effect |
 |---|---|---|---|
 | open | agent message count reaches `max_agent_msgs` (trigger) or job cap hit | capped | Needs-you `thread_capped`; further agent posts rejected `thread_not_open` |
-| capped | user "raise cap" | open | `max_agent_msgs += 10`, `max_agent_jobs += 4`, `cap_raises = 1` (only once) |
-| open, capped | user closes / task accepted / task cancelled | closed | queued jobs for the thread cancelled; later agent posts rejected and dropped |
-| closed | user reopens | open | — |
+| capped | user "raise cap" | open | `max_agent_msgs += 10`, `max_agent_jobs += 4`, `cap_raises = 1` (only once); **thread resume rule** |
+| open, capped | user closes / task accepted / task cancelled | closed | queued jobs for the thread cancelled; later agent posts rejected and dropped. User close of a thread whose task is non-terminal is allowed; the card shows the waiting line (UX.md §5) |
+| closed | user reopens, or T18 | open (`capped` if `agent_msg_count >= max_agent_msgs` or `agent_job_count >= max_agent_jobs`) | `closed_at = NULL`; if → open: **thread resume rule** |
+
+**Thread resume rule** (`lib/domain/resumeThread`, same txn as the thread → `open`): if the thread's task is `todo` → enqueue `work` for the assignee; `in_review` → enqueue director `review`; any other status → nothing (`in_progress` is recovered by the claim sweep, T9; `blocked`/`proposed`/terminal have their own path). Enqueue coalesces (J1), so a job that survived (e.g. T18's own `work`) is not duplicated. This is the only way jobs cancelled by J3 or by close come back.
 
 ## 4. Agent folder layout
 
@@ -556,8 +563,9 @@ Before each spawn the orchestrator deletes `CLAUDE.md`, `CLAUDE.local.md`, `.mcp
 | User message in a task thread whose task is not `blocked` | `respond` for director (the user never wakes the worker directly in MVP) | 80 |
 | User message in a task thread whose task is `blocked` (answers a help item), or user Unblock (T16) | `work` for assignee (via T16); director not woken | 100 |
 | Task enters `todo` with assignee (T1, T3, T4, T14, T16, T18) | `work` for assignee | 100 |
-| Task enters `in_review` (T8) | `review` for director | 50 |
-| `request_help` by worker (T11) | `help` for director | 60 |
+| Task enters `in_review` (T8, T16 resume rule) | `review` for director | 50 |
+| Thread → `open` by reopen / raise cap / T18 (§3.3 thread resume rule) | `work` if task `todo`, `review` if `in_review` | 100 / 50 |
+| Worker `work` job that called `request_help` ends (T11, enqueued in `finishAttempt`) | `help` for director | 60 |
 | Director `post_message` with `wake: true` mentioning `worker` | task `blocked/help` → T16 → `work`; otherwise `respond` for worker, only if the thread's task is non-terminal and assigned to it | 90 |
 | Anything else: agent messages without `wake`, worker messages, system messages, approvals of `send/spend/...` | none | — |
 
@@ -588,7 +596,12 @@ async function boot() {
 function tick() {
   const s = systemState(); writeOrchestratorHeartbeat();
   if (s.kill_switch) { if (children.size) killAll('kill'); return; }
-  if (!s.doctor_ok_at || (s.paused_until ?? 0) > now()) return;
+  // user cancels (J16/J17): Next.js only flags the row; we kill, finishAttempt moves it to cancelled
+  for (const r of db.all(`SELECT j.id FROM jobs j LEFT JOIN tasks k ON k.id = j.task_id
+                          WHERE j.status='running' AND j.lease_owner=:me
+                            AND (j.cancel_requested = 1 OR k.status = 'cancelled')`))
+    if (children.has(r.id)) kill(children.get(r.id), 'cancelled');
+  if (!s.doctor_ok_at || s.pause_reason === 'user' || (s.paused_until ?? 0) > now()) return;
   cancelDeadQueuedJobs();                      // J4
   while (children.size < s.max_concurrency) {
     const job = claimNext(s);                  // §5.3; null if nothing claimable or gate closed
@@ -609,7 +622,8 @@ UPDATE jobs
        last_output_at = :now, started_at = :now, finished_at = NULL,
        run_token_hash = :token_hash, budget_reserved_usd = budget_cap_usd, error = NULL, failure_kind = NULL
  WHERE status = 'queued'
-   AND (SELECT kill_switch = 0 AND ifnull(paused_until, 0) <= :now FROM system_state WHERE id = 1)
+   AND (SELECT kill_switch = 0 AND ifnull(paused_until, 0) <= :now AND pause_reason IS NOT 'user'
+          FROM system_state WHERE id = 1)
    AND id = (
      SELECT j.id FROM jobs j
        JOIN agents a  ON a.id = j.agent_id
@@ -662,14 +676,14 @@ function sweep() {               // every 5 s
   // expired task claims with no running job -> T9
   // orphaned jobs, REGARDLESS of lease_owner (covers our own crash between claim and spawn, or a
   // finishAttempt that threw): status='running' AND lease_expires_at < now AND id NOT IN children
-  //   -> sweepByMarker(`--sb-job=${id}`); finishAttempt(job, {failure:'orphaned'}) with the owner guard
-  //      relaxed to lease_owner = <the row's current owner> (J11)
+  //   -> sweepByMarker(`--sb-job=${id}`); finishAttempt(j, {failure:'orphaned'}, j.lease_owner) (J11;
+  //      J16/J17 if cancel_requested = 1)
   // pending approvals past expires_at -> 'expired' (decided_by='system') -> T5
 }
 ```
 Our own live children always have a fresh lease (heartbeat every 15 s), so the sweep never touches them.
 
-On child `close(code, signal)`: `finishAttempt(job, {exitCode, signal, result: c.result, killedFor: c.killedFor, init: c.init, sawUsageLimit: c.sawUsageLimit})` in one IMMEDIATE txn (guarded `lease_owner = :me`, §3.2), which applies §3.2, writes `job.attempt_finished` with `cost_usd` (the budget ledger), releases the reservation, and applies the task side effects.
+On child `close(code, signal)`: `finishAttempt(job, {exitCode, signal, result: c.result, killedFor: c.killedFor, init: c.init, sawUsageLimit: c.sawUsageLimit})` in one IMMEDIATE txn (default `expectedOwner = ME`, so a row already recovered by another owner is a no-op, §3.2), which applies §3.2, writes `job.attempt_finished` with `cost_usd` (the budget ledger), releases the reservation, and applies the task side effects.
 
 ### 5.5 Budgets
 
@@ -702,7 +716,8 @@ async function recoverOrphans() {
       process.kill(-j.pid, 'SIGTERM'); if (!(await waitDead(j.pid, 5000))) process.kill(-j.pid, 'SIGKILL');
     }
     sweepByMarker(`--sb-job=${j.id}`);           // ps scan: MCP shims are started with this arg (§6.2)
-    finishAttempt(j, { failure: 'orphaned' });   // J11: retryable, backoff
+    finishAttempt(j, { failure: 'orphaned' }, j.lease_owner);  // owned by the dead orchestrator's ME, not ours;
+                                                               // J11 (retryable, backoff), or J16/J17 if cancel_requested = 1
   }
   db.run(`UPDATE tasks SET status='todo', claimed_by=NULL, claim_expires_at=NULL,
                            updated_by='system', updated_at=:now WHERE status='in_progress'`);
@@ -725,7 +740,7 @@ The LLM chief of staff (§9.3) is Phase 2.
 
 1. UI `POST /api/kill` → txn `system_state.kill_switch = 1, kill_engaged_at = now`, event `kill.engaged`; then best-effort `POST /control/kill` to the orchestrator (the 1 s tick catches it otherwise).
 2. Orchestrator `killAll('kill')`: revoke every run token first (tool calls fail immediately), SIGTERM each process group, SIGKILL after 3 s, then at 5 s `sweepByMarker('--sb-job=')` and a `ps` scan for any `claude` whose argv contains a known session id → SIGKILL. Survivors (pid list) go in a `kill.engaged` follow-up event and the UI banner.
-3. Jobs → `killed` (J15); their `work` tasks → `blocked/killed` (T20). Queued jobs stay queued and are not claimed until resume.
+3. Jobs → `killed` (J15); their `work`/`review` tasks (`in_progress` or `in_review`) → `blocked/killed` (T20); "Retry all" (T16) sends each back to `in_review` + `review` or `todo` + `work` by the resume rule. Queued jobs stay queued and are not claimed until resume.
 4. Process-group assumption: `spawn(..., {detached: true})` makes `claude` a group leader; that `claude` keeps its MCP children in its group is **UNVERIFIED**. Fallback is the argv-marker sweep in step 2, which the e2e test S3 asserts.
 5. Resume: `POST /api/resume` (confirm) → `kill_switch = 0`, event `kill.released`.
 
