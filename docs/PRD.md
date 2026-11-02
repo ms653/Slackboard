@@ -60,21 +60,22 @@ Run as an automated e2e test with a fake `claude` binary (deterministic, TECH.md
 3. Director proposes a top-level task assigned to `worker`.
 4. User approves it in Needs you.
 5. Worker writes the file and submits for review.
-6. Director requests changes once (fake script forces this); worker revises; director approves.
+6. Director requests changes once (fake script forces this; a real director may instead approve round 1); worker revises; director approves.
 7. Director posts a summary to the user in the task thread; the task appears in Needs you as "Ready".
 
-**Pass criteria (all must hold):**
+**Pass criteria.** Fake-binary run: P1–P8 all must hold. Real-binary run (manual, TECH.md §11): P1-real, P2, P3, P6, P7 and P8 (real bounds) must hold; P1, P4 and P5 are fake-binary only, because they depend on the scripted one-rework path and the injected retry. P8's real-binary bounds are the only criteria the real run adds.
 
 | ID | Criterion | How measured |
 |---|---|---|
-| P1 | Board shows the task in order Proposed → To do → In progress → In review → To do → In progress → In review → Done | that task's `task.created` event (`payload.status = 'proposed'`), followed by its `task.status_changed` rows in id order with `to` = todo, in_progress, in_review, todo, in_progress, in_review, done (exact; no other rows) |
+| P1-real | (real binary only, replaces P1) Status path is a legal sequence Proposed → … → Done with 1–2 review rounds (0 or 1 rework loop; a second change request hits the review limit and fails P3) | the task's `task.created` (`payload.status = 'proposed'`), then its `task.status_changed` rows in id order: last `to` = done, every `from>to` pair legal per TECH.md §3.1 (`tasks_legal_transition`), no `to` = blocked |
+| P1 | (fake binary only) Board shows the task in order Proposed → To do → In progress → In review → To do → In progress → In review → Done | that task's `task.created` event (`payload.status = 'proposed'`), followed by its `task.status_changed` rows in id order with `to` = todo, in_progress, in_review, todo, in_progress, in_review, done (exact; no other rows) |
 | P2 | No worker job starts before the approval is `approved` | `jobs.started_at` (worker) > `approvals.decided_at` |
 | P3 | Exactly 1 user decision needed before delivery (the approval), plus 1 "Ready" item after | `count(events type='approval.requested')` + `count(events type='task.status_changed', to='done', top-level task)` = 2; zero `task.status_changed` to `blocked`; zero `help` messages mentioning `user` |
-| P4 | Total jobs ≤ 6 (director respond, worker work ×2, director review ×2, + ≤1 slack) | `SELECT count(*) FROM jobs` |
-| P5 | No duplicate side effects after one injected retry (fake binary, director `respond` job of step 3, attempt 1 only: `post_message`, then exit 1 before `create_task`; the retry repeats that `post_message` then creates the task, so no task status flips and P1 stays exact) | messages with same body in thread = 1; `count(events type='tool.called' AND payload.replay = true)` = 1 |
+| P4 | (fake binary only) Total jobs ≤ 6 (director respond, worker work ×2, director review ×2, + ≤1 slack) | `SELECT count(*) FROM jobs` |
+| P5 | (fake binary only) No duplicate side effects after one injected retry (fake binary, director `respond` job of step 3, attempt 1 only: `post_message`, then exit 1 before `create_task`; the retry repeats that `post_message` then creates the task, so no task status flips and P1 stays exact) | messages with same body in thread = 1; `count(events type='tool.called' AND payload.replay = true)` = 1 |
 | P6 | Zero `claude` processes remain after the scenario | process scan for the run session ids |
 | P7 | Every agent message is visible in the thread; no agent message addressed to the user before review approval | `messages` where `author_kind='agent'` and mentions user and created before task done = 0 (except the approval request) |
-| P8 | Wall clock ≤ 60 s with fake binary; ≤ 15 min, ≤ $3.00 est., zero unexpected `permission_denials` with real binary | timers, `jobs.cost_usd`, `jobs.permission_denials` |
+| P8 | Fake binary: wall clock ≤ 60 s. Real binary (the only real-run bounds): wall clock ≤ 15 min, ≤ $3.00 est. total, zero unexpected `permission_denials` | timers, `jobs.cost_usd`, `jobs.permission_denials` |
 
 **Scenario S2 (rejection):** user rejects the proposal → task Cancelled, zero worker jobs. Pass: `count(jobs where agent='worker') = 0`.
 

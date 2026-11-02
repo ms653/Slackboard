@@ -58,7 +58,9 @@ Items are created only by server rules (the MVP chief of staff, TECH.md §5.8). 
 | Failure | job failed terminally, or agent blocked the task | Retry | Cancel task / Open log |
 | Thread capped | thread hit message or job cap | `cap_raises = 0`: Raise cap (+10 messages, +4 runs) / Close thread. `cap_raises = 1`: only Close thread, with text "Cap already raised once" | |
 
-**Where Retry goes** (Retry, Retry all, Unblock; TECH.md T16 resume rule): a task stopped during review (submitted diff not yet judged, workspace unchanged) returns to **In review** and the director re-reviews; every other task returns to **To do** and the worker runs. The Retry button's toast says which: "T-7 back to In review" / "T-7 back to To do". The grouped kill item lists the split: "2 back to review, 1 back to To do".
+**Where Retry goes** (Retry, Retry all, Unblock; TECH.md §3.1 `resumeTarget`): a task stopped during review (submitted diff not yet judged, workspace unchanged) returns to **In review** and the director re-reviews; a task stopped during review whose workspace changed returns to **To do** and that round is redone (the unjudged diff is set aside; card "round 2 of 2, redo"); every other task returns to **To do** and the worker runs. The Retry button's toast says which: "T-7 back to In review" / "T-7 back to To do" / "T-7 back to To do (round 2 redone)". The grouped kill item lists the split: "2 back to review, 1 back to To do".
+
+**Not an inbox item:** a director `respond`/`help` run that fails terminally (no task to block) creates no Needs-you item; it shows only in its thread and in presence (§8 "Agent failure, terminal (respond/help job)").
 
 **Recently expired** (group below the list, last 24 h, from `GET /api/bootstrap`; not counted in the badge): greyed row "Expired after 24 h." New-task approval → [Re-propose]; send/spend/post/budget approval → [Ask the director again]. Both prefill the `#general` composer with `@director Please re-propose T-7 "<title>"` (or `…ask again: <summary>`) for the user to edit and send; nothing is sent automatically. The row leaves the group after 24 h.
 
@@ -88,7 +90,7 @@ Rules: oldest first; pending items resolved elsewhere disappear with an "Already
 | working | ● filled circle + elapsed | Working · 0:42 | `work`/`respond`/`help` job running; sub-line shows last tool, e.g. "Edit INSTALL.md" |
 | reviewing | ◐ half circle | Reviewing T-7 | `review` job running |
 | blocked | ⏸ pause bars | Waiting on you | its task needs an approval/help answer |
-| failed | ✕ cross | Failed · Retry 2/3 or Failed | last attempt failed; retry pending or terminal |
+| failed | ✕ cross | Failed · Retry 2/3 or Failed | last attempt failed; retry pending or terminal. Terminal stays Failed until that agent's next successful run |
 | paused | ⊘ slashed circle | Paused: budget / limit / kill / you | scheduler not claiming jobs |
 | disabled | – dash, greyed text | Disabled | agent switched off in Settings |
 
@@ -107,7 +109,8 @@ Rules: oldest first; pending items resolved elsewhere disappear with an "Already
 ```
 
 - **Reason line (Blocked cards, always shown, from `blocked_reason`):** `help` → "Blocked: waiting on director (help)", or "Blocked: waiting on you (help)" if the director escalated to the user; `review_cap` → "Blocked: you need to decide (review limit)"; `job_failed` → "Blocked: failed 3 times" (or "Blocked: workspace changed after review" for `workspace_drift`); `killed` → "Blocked: stopped by kill switch"; `agent_blocked` → "Blocked by worker: <first line of note>"; `user` → "Blocked: you cancelled the run".
-- **Waiting line (non-Blocked cards in To do / In progress / In review whose thread is not open; from `threads.status`):** closed → "⏸ Waiting: thread closed [Reopen thread]"; capped with `cap_raises = 0` → "⏸ Waiting: thread capped [Raise cap]"; capped with `cap_raises = 1` → "⏸ Waiting: thread capped, cap already raised (cancel or reopen later)". No card in those columns is idle without a line. Reopen / Raise cap re-queue the run matching the column (To do → worker, In review → director review; TECH.md §3.3 resume rule); toast "Cap raised. T-7 will resume." / "Thread reopened. T-7 will resume." (no toast text about resuming when the task is Blocked or Done).
+- **Waiting line (non-Blocked cards in To do / In progress / In review whose thread is not open; from `threads.status`):** closed → "⏸ Waiting: thread closed [Reopen thread]"; capped with `cap_raises = 0` → "⏸ Waiting: thread capped [Raise cap]"; capped with `cap_raises = 1` → "⏸ Waiting: thread capped, cap already raised [Cancel task]" (the only exit). No card in those columns is idle without a line. Reopen / Raise cap re-queue the run matching the column (To do → worker, In review → director review; TECH.md §3.3 resume rule). The toast is driven by the API response `{status, resumed}` (TECH.md §1.1), never assumed: `resumed` set → "Cap raised. T-7 will resume." / "Thread reopened. T-7 will resume."; `resumed: null` and `status: 'capped'` (reopen of a thread at its cap) → "Thread reopened but still capped. T-7 will not resume." + [Raise cap] when `cap_raises = 0`; `resumed: null` otherwise (task Blocked or Done) → "Cap raised." / "Thread reopened." with no resume text.
+- **Round label:** "round N of 2" with N = `review_round` (TECH.md §3.1 round terms); after a redo (`resumeTarget` set the unjudged diff aside) the card shows "round N+1 of 2, redo" until the worker resubmits (shown while the task is To do / In progress and a `superseded` artifact exists for its `review_cycle` at round N+1).
 - **Flag row** mirrors the Needs-you item type and appears only while that item exists: "⚑ Needs approval" / "⚑ Needs reply" / "⚑ Ready to accept" / "⚑ Review limit" / "⚑ Stopped by kill" / "⚑ Failed" / "⚑ Thread capped".
 - **Done cards** show "✓ Ready, not accepted" (top-level, `accepted_at` null) or "✓ Accepted"; subtasks show "✓ Done".
 - The icons are decorative (`aria-hidden`); every icon has adjacent text.
@@ -149,7 +152,7 @@ Board header has `+ New task` (also in the quick switcher, `⌘K` → "New task"
 | To do, In progress, In review | Cancel task; Cancel job on a queued/running job (confirm; running job → task Blocked "you cancelled the run") |
 | Blocked | Unblock with note (`review_cap`: labelled "Send back with note"; destination per "Where Retry goes", §3); Cancel task |
 | Done | Accept (top-level, not accepted); Reopen with note (reopens the closed thread too) |
-| thread closed / capped, task not Blocked/terminal | the §5 waiting line with Reopen thread / Raise cap |
+| thread closed / capped, task not Blocked/terminal | the §5 waiting line with Reopen thread / Raise cap (`cap_raises = 0`); Cancel task (always, the only exit when capped with `cap_raises = 1`) |
 | any with an artifact | View diff (§7) |
 | any job row | Open log |
 
@@ -162,7 +165,7 @@ Board header has `+ New task` (also in the quick switcher, `⌘K` → "New task"
 - System messages (status changes, job start/finish, retries, caps) are compact grey lines with icon + text, collapsible as "5 system events".
 - Agent messages that were dropped (thread closed/capped) are not shown; a system line says "1 message dropped: thread closed".
 - Thread footer shows cap usage: "Agent messages 12/30 · Agent runs 4/12". At ≥ 80 % the text gets a "Near limit" label.
-- Composer: `@` autocompletes agents. **Every** composer (channel, thread, Needs-you Reply) shows a live hint under it, computed from the same wake rules the server uses (TECH.md §5.1 `wakePreview`): "Will wake director" / "Will wake worker and unblock T-7" / "No agent will run (thread capped)" / "No agent will run (thread closed)". When the thread's agent runs are ≥ 80 % of its cap, the hint adds "Uses 1 of N remaining agent runs".
+- Composer: `@` autocompletes agents. **Every** composer (channel, thread, Needs-you Reply) shows a live hint under it, computed from the same wake rules the server uses (TECH.md §5.1 `wakePreview`): "Will wake director" / "Will wake worker and unblock T-7" / "Will unblock T-7 and wake director to re-review" (the unblock target comes from TECH.md §3.1 `resumeTarget`, the same call the server makes) / "No agent will run (thread capped)" / "No agent will run (thread closed)". When the thread's agent runs are ≥ 80 % of its cap, the hint adds "Uses 1 of N remaining agent runs".
 - Closed thread: composer replaced by "Thread closed. [Reopen]" (user only).
 
 ```
@@ -200,7 +203,7 @@ MVP: read-only, server-captured unified diff of the task workspace for the submi
 | [Accept  a]   [Reopen with note  r]          (footer for "Done, not accepted") |
 ```
 
-**Verdict line:** `approved` → "✓ Approved by director <time>"; `changes_requested` → "✕ Changes requested by director <time>" (always so for `review_cap`, with "Round 2 of 2 · review limit reached"); no verdict yet → "◐ Awaiting director review".
+**Verdict line:** `approved` → "✓ Approved by director <time>"; `changes_requested` → "✕ Changes requested by director <time>" (always so for `review_cap`, with "Round 2 of 2 · review limit reached"); no verdict yet → "◐ Awaiting director review"; `superseded` (TECH.md §3.1 `resumeTarget` redo) → "⟲ Set aside: workspace changed before review; round redone".
 
 **Footer by task state** (only these render; each maps to TECH.md §3.1):
 
@@ -227,14 +230,15 @@ Diff lines carry `+`/`−` prefixes and screen-reader text "added line" / "remov
 | Agent job running | card, sidebar, thread | presence Working + last tool; thread shows "director is working…" line | Cancel job (task detail) |
 | Agent failure, retrying | card badge, thread system line | "✕ Run failed (exit 1). Retrying in 30 s (2/3)." | Retry now (`POST /api/jobs/:id {retry_now}`: runs at the next claim, still subject to caps/budget) / Cancel (`{cancel}`, J4) |
 | Agent failure, terminal | Needs you + card Blocked | "✕ worker failed 3 times on T-7: <short reason>. [Open log]" | Retry / Reassign [P2] / Cancel |
+| Agent failure, terminal (respond/help job) | thread system line + presence Failed (no task, **no Needs-you item**, §3) | "✕ director failed 3 times: <reason>. [Open log]" with hint "Send your message again to retry." Presence stays Failed until that agent's next successful run (TECH.md J12) | Open log; resend the message (normal wake rules) |
 | Max turns hit | thread system line | "worker hit its turn limit; continuing once." then, if again, failure item | — |
 | Budget hit | header banner (amber, ⊘) + sidebar Paused | "Daily budget reached ($5.00 est.). New agent runs are paused until 00:00 or you raise the budget. Running jobs finish." | Raise budget (opens Settings §12 with the field focused) / Dismiss |
 | Job cap hit (day or 5 h) | same as budget | "Job cap reached (25 per 5 h). Next run allowed at 14:20." | Raise cap (opens Settings §12 with the field focused) |
 | Subscription limit suspected | banner (amber, ⊘) | "Claude reported a usage limit. Agents paused until 14:52 (30 min). This also affects your own Claude use." | Resume now (`POST /api/pause {resume}`) / Keep paused (`{hold}`: no expiry; becomes the next row) |
 | Paused by you | banner (amber, ⊘) + presences "Paused: you" | "Agents paused until you resume. Queued work waits." | Resume now (`POST /api/pause {resume}`) |
 | Kill switch engaged | full-width red banner, all presences Paused: kill | "■ All agents stopped at 10:14. 2 processes killed. No new runs until you resume." | Resume (confirm) |
-| Thread capped | thread footer + Needs you + task card waiting line (§5) | "Thread reached 30 agent messages. Agents can no longer post here." | `cap_raises = 0`: Raise cap (+10 messages, +4 runs; toast "Cap raised. T-7 will resume." when its task is To do / In review) / Close. `cap_raises = 1`: Close only, "Cap already raised once" |
-| Task thread closed, task still open | thread composer + task card waiting line (§5) | "Thread closed. T-7 is waiting." | Reopen thread (toast "Thread reopened. T-7 will resume.") / Cancel task |
+| Thread capped | thread footer + Needs you + task card waiting line (§5) | "Thread reached 30 agent messages. Agents can no longer post here." | `cap_raises = 0`: Raise cap (+10 messages, +4 runs; toast from the API `resumed`, §5) / Close / Cancel task (task threads). `cap_raises = 1`: "Cap already raised once": Close / Cancel task (task threads; the only way to end the task's wait) |
+| Task thread closed, task still open | thread composer + task card waiting line (§5) | "Thread closed. T-7 is waiting." | Reopen thread (toast from the API `{status, resumed}`, §5: "Thread reopened. T-7 will resume." or, if the thread is at its cap, "Thread reopened but still capped. T-7 will not resume." + [Raise cap] when `cap_raises = 0`) / Cancel task |
 | Approval expired | Needs you → Recently expired group (§3), 24 h | "Expired after 24 h. Task cancelled." | Re-propose / Ask the director again (prefills `#general` composer) |
 | Initial load / API failure | centre pane, full | "Couldn't load Slackboard. [Retry]" plus the error code (e.g. `HTTP 500 db_locked`) | Retry |
 | Message send failed | under composer | Text stays in the composer: "Not sent. [Retry]" | Retry |
