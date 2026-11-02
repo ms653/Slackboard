@@ -16,9 +16,9 @@ Desktop ≥ 1200 px. Left 240 px fixed; centre flexible; right 420 px, closable.
 
 ```
 +--------------------------------------------------------------------------------------------+
-| Slackboard   Today: 14/60 jobs · 5h: 6/25 · $1.82/$5.00 est.   [orchestrator: up]  [■ KILL] |
+| Slackboard   Today: 14/60 jobs · 5h: 6/25 · $1.82/$5.00 est. [orchestrator: up] [⚙] [■ KILL]|
 +-------------------+--------------------------------------------+---------------------------+
-| ▸ Needs you   (2) | #general            [ Chat | Board ]        | Thread: T-7 INSTALL docs  |
+| ▸ Needs you   (2) | #general     [ Needs you | Chat | Board ]  | Thread: T-7 INSTALL docs  |
 |                   |--------------------------------------------|  ✕                        |
 | CHANNELS          | You  10:02                                 |---------------------------|
 |  # general        |   @director Write docs/INSTALL.md for ...  | Task T-7 · In review ◐    |
@@ -37,9 +37,9 @@ Desktop ≥ 1200 px. Left 240 px fixed; centre flexible; right 420 px, closable.
 +-------------------+--------------------------------------------+---------------------------+
 ```
 
-- **Header (global status bar):** job counters (day and rolling 5 h), estimated spend vs budget, orchestrator heartbeat (`up` / `stale` / `down`), kill switch button. The header turns into a banner for kill, budget-hit, limit-pause and orchestrator-down states (§8).
-- **Left:** Needs you (with count), channels, agents with presence, board summary counts (each is a link that filters the board).
-- **Centre:** `#general` in Chat or Board view (toggle; `g c` / `g b`).
+- **Header (global status bar):** job counters (day and rolling 5 h), estimated spend vs budget, orchestrator heartbeat (`up` / `stale` / `down`), `⚙ Settings` button (opens §12 in the centre, `g s`), kill switch button. The header turns into a banner for kill, budget-hit, limit-pause and orchestrator-down states (§8).
+- **Left:** Needs you (with count; selecting it opens the Needs you view), channels, agents with presence, board summary counts (each is a link that filters the board), and `⚙ Settings` at the bottom.
+- **Centre:** three views, segmented control `Needs you | Chat | Board` (`g i` / `g c` / `g b`), plus Settings (`g s`, not in the control). Default on load: Needs you if its count > 0, else Chat. Below 800 px the `Inbox` tab is the Needs you view.
 - **Right:** contextual detail: thread, task detail, review/diff, or approval detail. One at a time, with a back stack.
 
 ## 3. "Needs you" inbox
@@ -50,10 +50,15 @@ Items are created only by server rules (the MVP chief of staff, TECH.md §5.8). 
 |---|---|---|---|
 | Approval: new task | agent proposes top-level task | Approve | Reject (with note) |
 | Approval: send / spend / post external | agent calls `request_approval` | Approve (shows exact payload; MVP: "I'll do it myself" + copy) | Reject |
-| Help request | director calls `request_help` (workers ask the director, never the user) | Reply (opens thread; replying unblocks the task) | Cancel task |
+| Approval: budget increase | agent calls `request_approval` kind `budget_increase` | Approve → opens Settings (§12) prefilled with the requested values; the change happens only on Save there | Reject |
+| Help request | director calls `request_help` (workers ask the director, never the user) | Reply (opens thread; replying unblocks the task; composer shows the wake hint, §6) | Cancel task |
 | Ready | task reached Done after review | Accept | Reopen (with note) |
-| Failure | job failed terminally, task Blocked | Retry | Cancel task / Open log |
-| Thread capped | thread hit message or job cap | Raise cap by +10 once / Close thread | |
+| Review limit reached | director requested changes in round 2 (task Blocked, `review_cap`) | View diff + verdict (opens §7 with the round-2 reviewer notes) | Send back with note (required; task → To do, label "Review rounds reset to 0 of 2") / Cancel task. No "Accept anyway" (PRD §6 decision) |
+| Stopped by kill switch | tasks Blocked `killed`; shown after Resume as **one** grouped item | "N tasks were stopped by the kill switch." [Retry all] (`POST /api/tasks/unblock-killed`) | [Review individually] (expands to one row per task: Retry = Unblock / Cancel task) |
+| Failure | job failed terminally, or agent blocked the task | Retry | Cancel task / Open log |
+| Thread capped | thread hit message or job cap | `cap_raises = 0`: Raise cap (+10 messages, +4 runs) / Close thread. `cap_raises = 1`: only Close thread, with text "Cap already raised once" | |
+
+**Recently expired** (group below the list, last 24 h, from `GET /api/bootstrap`; not counted in the badge): greyed row "Expired after 24 h." New-task approval → [Re-propose]; send/spend/post/budget approval → [Ask the director again]. Both prefill the `#general` composer with `@director Please re-propose T-7 "<title>"` (or `…ask again: <summary>`) for the user to edit and send; nothing is sent automatically. The row leaves the group after 24 h.
 
 ```
 +-- Needs you (2) ---------------------------------------------------------+
@@ -70,7 +75,7 @@ Items are created only by server rules (the MVP chief of staff, TECH.md §5.8). 
 +---------------------------------------------------------------------------+
 ```
 
-Rules: oldest first; items resolved elsewhere disappear with an "Already handled" toast; the count in the left pane and the document title (`(2) Slackboard`) update live. Approving a `spend` / `send` / `post_external` item opens a confirm dialog that repeats the payload; approving a new task does not.
+Rules: oldest first; pending items resolved elsewhere disappear with an "Already handled" toast (expired approvals move to Recently expired instead); the count in the left pane and the document title (`(2) Slackboard`) update live. Approving a `spend` / `send` / `post_external` item opens a confirm dialog that repeats the payload; approving a new task does not.
 
 ## 4. Agent presence
 
@@ -94,10 +99,14 @@ Rules: oldest first; items resolved elsewhere disappear with an "Already handled
 | ↳ subtask of T-3                        |   parent link (only if parent)
 | @worker   ● Working · 0:42             |   assignee + live presence of claimant
 | 6 replies · 1 file · $0.31 est.          |   thread replies · artifacts · spend on task
-| ⚑ Needs approval                        |   flag row only when Needs-you item exists
+| ⏸ Blocked: waiting on director (help)    |   reason line: mandatory on every Blocked card
+| ⚑ Needs reply                           |   flag row only when a Needs-you item exists
 +-----------------------------------------+
 ```
 
+- **Reason line (Blocked cards, always shown, from `blocked_reason`):** `help` → "Blocked: waiting on director (help)", or "Blocked: waiting on you (help)" if the director escalated to the user; `review_cap` → "Blocked: you need to decide (review limit)"; `job_failed` → "Blocked: failed 3 times" (or "Blocked: workspace changed after review" for `workspace_drift`); `killed` → "Blocked: stopped by kill switch"; `agent_blocked` → "Blocked by worker: <first line of note>"; `user` → "Blocked: you cancelled the run".
+- **Flag row** mirrors the Needs-you item type and appears only while that item exists: "⚑ Needs approval" / "⚑ Needs reply" / "⚑ Ready to accept" / "⚑ Review limit" / "⚑ Stopped by kill" / "⚑ Failed" / "⚑ Thread capped".
+- **Done cards** show "✓ Ready, not accepted" (top-level, `accepted_at` null) or "✓ Accepted"; subtasks show "✓ Done".
 - The icons are decorative (`aria-hidden`); every icon has adjacent text.
 - Claim expired badge: "Claim expired, requeued" (amber, ⟲ icon) for 10 s after recovery.
 - Card click opens task detail in the right pane; `Enter` on focused card does the same.
@@ -110,6 +119,38 @@ Rules: oldest first; items resolved elsewhere disappear with an "Already handled
 | [T-9 card]     | No tasks.     | [T-7 card]      | No tasks.     | No tasks.   | [T-6]... |
 | ⚑ approve      |               |                 |               |             |          |
 ```
+Board header has `+ New task` (also in the quick switcher, `⌘K` → "New task").
+
+### 5.1 Task detail (right pane)
+
+```
+| T-7 · ⏸ Blocked · assignee: worker · round 2 of 2              ✕          |
+| Blocked: you need to decide (review limit)                                 |
+|---------------------------------------------------------------------------|
+| Description …            Acceptance 1. … 2. …                              |
+| Notes (latest 10) …                                                        |
+| Jobs                                                                       |
+|  work    attempt 1/3  ✓ succeeded   $0.42 est.   [Open log]                |
+|  review  attempt 1/3  ✓ succeeded   $0.18 est.   [Open log]                |
+|  work    attempt 2/3  ● running     cap $1.00    [Cancel job]              |
+|---------------------------------------------------------------------------|
+| [Send back with note] [View diff d] [Cancel task]                          |
+```
+- **Header:** id, status text + icon, assignee, review round, and the §5 reason line when Blocked.
+- **Body:** description, acceptance, notes, jobs list (kind, attempt n/max, status text + icon, est. cost or reserved cap while running).
+- **Actions by state** (only legal ones render; each maps to TECH.md §3.1/§3.2):
+
+| Task state | Actions |
+|---|---|
+| Proposed | Approve / Reject (same as inbox) |
+| To do, In progress, In review | Cancel task; Cancel job on a queued/running job (confirm; running job → task Blocked "you cancelled the run") |
+| Blocked | Unblock with note (`review_cap`: labelled "Send back with note"); Cancel task |
+| Done | Accept (top-level, not accepted); Reopen with note |
+| any with an artifact | View diff (§7) |
+| any job row | Open log |
+
+- **Log view** (read-only, replaces the body; Back returns): last 200 transcript lines (`GET /api/jobs/:id/log`), then failure kind and error text, e.g. "Failed: timeout_idle — no output for 3 min".
+- **New task form** (`+ New task`): title (required), description, assignee (default worker). Create → task lands in To do with no approval (the user is acting) and a "Will wake worker" hint under the Create button.
 
 ## 6. Thread view
 
@@ -117,7 +158,7 @@ Rules: oldest first; items resolved elsewhere disappear with an "Already handled
 - System messages (status changes, job start/finish, retries, caps) are compact grey lines with icon + text, collapsible as "5 system events".
 - Agent messages that were dropped (thread closed/capped) are not shown; a system line says "1 message dropped: thread closed".
 - Thread footer shows cap usage: "Agent messages 12/30 · Agent runs 4/12". At ≥ 80 % the text gets a "Near limit" label.
-- Composer: `@` autocompletes agents. Sending a message that mentions an agent shows "Will wake director" under the composer before send.
+- Composer: `@` autocompletes agents. **Every** composer (channel, thread, Needs-you Reply) shows a live hint under it, computed from the same wake rules the server uses (TECH.md §5.1 `wakePreview`): "Will wake director" / "Will wake worker and unblock T-7" / "No agent will run (thread capped)" / "No agent will run (thread closed)". When the thread's agent runs are ≥ 80 % of its cap, the hint adds "Uses 1 of N remaining agent runs".
 - Closed thread: composer replaced by "Thread closed. [Reopen]" (user only).
 
 ```
@@ -171,26 +212,31 @@ Diff lines carry `+`/`−` prefixes and screen-reader text "added line" / "remov
 | Agent failure, retrying | card badge, thread system line | "✕ Run failed (exit 1). Retrying in 30 s (2/3)." | Retry now / Cancel |
 | Agent failure, terminal | Needs you + card Blocked | "✕ worker failed 3 times on T-7: <short reason>. [Open log]" | Retry / Reassign [P2] / Cancel |
 | Max turns hit | thread system line | "worker hit its turn limit; continuing once." then, if again, failure item | — |
-| Budget hit | header banner (amber, ⊘) + sidebar Paused | "Daily budget reached ($5.00 est.). New agent runs are paused until 00:00 or you raise the budget. Running jobs finish." | Raise budget (confirm dialog, `spend`) / Dismiss |
-| Job cap hit (day or 5 h) | same as budget | "Job cap reached (25 per 5 h). Next run allowed at 14:20." | Raise cap (confirm) |
+| Budget hit | header banner (amber, ⊘) + sidebar Paused | "Daily budget reached ($5.00 est.). New agent runs are paused until 00:00 or you raise the budget. Running jobs finish." | Raise budget (opens Settings §12 with the field focused) / Dismiss |
+| Job cap hit (day or 5 h) | same as budget | "Job cap reached (25 per 5 h). Next run allowed at 14:20." | Raise cap (opens Settings §12 with the field focused) |
 | Subscription limit suspected | banner (amber, ⊘) | "Claude reported a usage limit. Agents paused for 30 min. This also affects your own Claude use." | Resume now / Keep paused |
 | Kill switch engaged | full-width red banner, all presences Paused: kill | "■ All agents stopped at 10:14. 2 processes killed. No new runs until you resume." | Resume (confirm) |
-| Thread capped | thread footer + Needs you | "Thread reached 30 agent messages. Agents can no longer post here." | Raise cap +10 once / Close |
-| Approval expired | Needs you item greys out | "Expired after 24 h. Task cancelled." | Re-propose (opens thread) |
+| Thread capped | thread footer + Needs you | "Thread reached 30 agent messages. Agents can no longer post here." | `cap_raises = 0`: Raise cap (+10 messages, +4 runs) / Close. `cap_raises = 1`: Close only, "Cap already raised once" |
+| Approval expired | Needs you → Recently expired group (§3), 24 h | "Expired after 24 h. Task cancelled." | Re-propose / Ask the director again (prefills `#general` composer) |
+| Initial load / API failure | centre pane, full | "Couldn't load Slackboard. [Retry]" plus the error code (e.g. `HTTP 500 db_locked`) | Retry |
+| Message send failed | under composer | Text stays in the composer: "Not sent. [Retry]" | Retry |
+| Card move rejected | board | Card snaps back; toast "Couldn't move T-7: <server hint>" | — |
+| Session expired (`401 session_invalid`) | header banner (amber) | "Session expired. [Reload page]" | Reload page |
+| Any mutating action pending | the button | Button shows "Approving…"/"Stopping…" etc. and is disabled until the response; other actions on the same item disabled too (no double Approve/Reject/Kill) | — |
 
 ## 9. Kill switch
 
 - Always-visible header button `■ KILL`, red, text label. Shortcut `Ctrl+Shift+K` (macOS `⌘⇧K`).
 - Opens a dialog: "Stop all agents now? Running processes will be killed. Unsaved agent work may be lost." Buttons: `Stop all` (default focus) / `Cancel`. `Enter` confirms.
 - After confirm the banner shows a live count "Stopping 2 processes…" → "Stopped". If any process survives 10 s: "1 process could not be stopped (pid 4312). [Copy kill command]".
-- Resume requires a second confirm and resets nothing else (budgets, caps unchanged).
+- Resume requires a second confirm and resets nothing else (budgets, caps unchanged). Tasks stopped by the kill stay Blocked; after Resume a banner and one grouped Needs-you item say "N tasks were stopped by the kill switch. [Retry all] [Review individually]" (§3). Retry = Unblock (TECH.md T16).
 
 ## 10. Keyboard
 
 | Keys | Action |
 |---|---|
 | `⌘K` / `Ctrl+K` | Quick switcher (channels, tasks by id/title, agents) |
-| `g i` / `g c` / `g b` | Go to Needs you / Chat / Board |
+| `g i` / `g c` / `g b` / `g s` | Go to Needs you / Chat / Board / Settings |
 | `j` / `k` | Next / previous item in focused list (messages, inbox, cards in column) |
 | `h` / `l` | Previous / next board column |
 | `Enter` | Open focused item in right pane |
@@ -214,3 +260,25 @@ Single-letter shortcuts are disabled while focus is in a text field.
 - `prefers-reduced-motion`: no card slide animations; status changes flash a text label instead.
 - Times have absolute value in `title` and accessible text ("10:02, 2 minutes ago").
 - Diff: `+`/`−` prefixes kept in the DOM; lines have screen-reader prefixes.
+
+## 12. Settings
+
+Opened by `⚙` in the header or left pane, `g s`, a budget/cap banner ("Raise budget" / "Raise cap" focus the matching field), or approving a `budget_increase` item (fields prefilled with the requested values, unsaved). Centre view; user only.
+
+```
+| Settings                                                                  |
+|-- Budgets & caps ---------------------------------------------------------|
+| Daily budget (est. USD)   [ 5.00 ]   used today $1.82 est.                |
+| Jobs per day              [  60  ]   used 14                              |
+| Jobs per rolling 5 h      [  25  ]   used 6                               |
+| Max concurrent agents     [   2  ]   (1–4)                                |
+|                                                  [Save]                   |
+|-- Agents -----------------------------------------------------------------|
+| director  model: sonnet (read-only)   [✓ Enabled]                         |
+| worker    model: sonnet (read-only)   [✓ Enabled]                         |
+|-- Doctor -----------------------------------------------------------------|
+| Last run 09:58 · ✓ all checks passed      [Re-run]   [Show report]        |
+```
+- **Save** opens a confirm dialog listing each change as old → new ("Daily budget $5.00 → $8.00 est."); confirm → `PUT /api/budgets`. Invalid values (≤ 0, concurrency outside 1–4) are shown inline and Save is disabled.
+- **Agents:** toggle → `PUT /api/agents/:id` (disabling shows "Queued jobs wait until re-enabled"); presence becomes Disabled (§4).
+- **Doctor:** last run time, pass/fail per check D1–D6, Re-run → `POST /api/doctor` (button shows "Running…"; result replaces the report).

@@ -35,12 +35,19 @@ Decisions:
 |---|---|
 | `POST /api/messages` | user message; enqueue wake jobs (§5.1) |
 | `POST /api/tasks` | user-created task (`todo`, no approval) |
-| `POST /api/tasks/:id` `{action: cancel\|reopen\|unblock\|accept\|move}` | user transitions (§3.1, actor=user) |
+| `POST /api/tasks/:id` `{action: cancel\|reopen\|unblock\|accept\|move, note?}` | user transitions (§3.1, actor=user) |
+| `POST /api/tasks/unblock-killed` | "Retry all" after kill: T16 for every `blocked/killed` task, one txn |
+| `POST /api/jobs/:id` `{action: cancel}` | user cancels a job (J4 queued / J17 running) |
+| `GET /api/jobs/:id/log` | read-only: last 200 transcript lines from `stdout.jsonl`, `failure_kind`, `error`, `exit_code` |
 | `POST /api/approvals/:id/decide` `{decision, note}` | the only writer of approval decisions |
 | `POST /api/threads/:id` `{action: close\|reopen\|raise_cap}` | thread lifecycle (§3.3) |
 | `POST /api/kill`, `POST /api/resume` | kill switch (§5.9) |
-| `PUT /api/budgets` | budget/cap edits (user only) |
-| `GET /api/bootstrap`, `GET /api/stream` | initial state; SSE events |
+| `PUT /api/budgets` `{day_usd, day_jobs, jobs_5h, max_concurrency}` | budget/cap edits (user only; Settings, UX.md §12); event `settings.changed {old, new}` |
+| `PUT /api/agents/:id` `{enabled}` | enable/disable an agent (Settings) |
+| `POST /api/doctor` | re-run doctor via `/control/doctor`; report lands in `system_state.doctor_report` |
+| `GET /api/bootstrap`, `GET /api/stream` | initial state (incl. Needs-you, recently expired approvals, settings); SSE events |
+
+Errors: every route returns `{ok:false, error, hint}` with an HTTP status; middleware rejects a missing/invalid `sb_session` with `401 {error:'session_invalid'}` (UI: "Session expired", UX.md §8).
 
 ## 2. SQLite DDL
 
@@ -456,7 +463,7 @@ Guards are enforced in `lib/domain` inside one `BEGIN IMMEDIATE` transaction; th
 | # | From | Event (actor) | To | Guard | Side effects |
 |---|---|---|---|---|---|
 | T1 | — | create (user) | todo | assignee set (default `worker`) | thread in `#general`; workspace init (§4); enqueue `work` |
-| T2 | — | `create_task`, parent null (director) | proposed | — | thread; approval `create_top_level_task` pending, expires 24 h; Needs-you item |
+| T2 | — | `create_task`, parent null (director) | proposed | — | thread; approval `create_top_level_task` pending (payload = `{title, description, acceptance, assignee}`), expires 24 h; event `approval.requested`; Needs-you item |
 | T3 | — | `create_task`, parent set (director) | todo | parent not `proposed/done/cancelled`; depth ≤ 1 | thread; workspace init; enqueue `work` |
 | T4 | proposed | approval approved (user) | todo | approval `approved` (trigger); `sha256(canonical {title, description, acceptance, assignee})` of the task row = `payload_hash` | workspace init; enqueue `work`. From here title/description/acceptance/assignee are immutable (trigger `tasks_agent_toplevel_immutable`) |
 | T5 | proposed | approval rejected / expired | cancelled | — | system message; director not woken |
@@ -676,7 +683,7 @@ All money figures are `total_cost_usd` estimates (ASSUMPTIONS.md §1), labelled 
 :jobs_day         = SELECT count(*) FROM events WHERE type='job.started' AND ts >= :local_midnight;
 :jobs_5h          = SELECT count(*) FROM events WHERE type='job.started' AND ts >= :now - 18000000;
 ```
-Reserving the full per-job cap (`jobs.budget_cap_usd`) covers `--max-budget-usd` overshoot by one response (research.md §2) except in the worst case; a running job is never killed for the daily budget (it has its own cap). Per-agent rows in `budgets` are applied the same way if present. Raising a limit is a user action (`PUT /api/budgets`, confirm dialog); agents can only file a `budget_increase` approval, which in MVP is a record the user acts on in Settings.
+Reserving the full per-job cap (`jobs.budget_cap_usd`) covers `--max-budget-usd` overshoot by one response (research.md §2) except in the worst case; a running job is never killed for the daily budget (it has its own cap). Per-agent rows in `budgets` are applied the same way if present. Raising a limit is a user action (`PUT /api/budgets`, confirm dialog); agents can only file a `budget_increase` approval, which in MVP is a record the user acts on in Settings (UX.md §12: Approve opens Settings prefilled; the change still goes through `PUT /api/budgets`).
 
 ### 5.6 Retry, backoff, usage limits
 
@@ -707,7 +714,7 @@ async function recoverOrphans() {
 ### 5.8 Chief of staff, MVP (deterministic)
 
 What reaches the user is decided by rules, not a model:
-1. Needs-you items come only from the `needs_you` view (§2): pending approvals, help messages mentioning `user`, terminal failures, top-level tasks Done and not accepted, capped threads.
+1. Needs-you items come only from the `needs_you` view (§2): pending approvals, help messages mentioning `user`, terminal failures, review limit reached (`review_cap`), tasks stopped by the kill switch (`killed`, grouped into one card by the UI), top-level tasks Done and not accepted, capped threads.
 2. Retries are not shown (only a thread system line). Only terminal failures create items.
 3. A message may mention `user` only if the tool server allowed it (§8 `post_message` rules: director, and only for non-task threads or after T13 approval). Workers never address the user.
 4. Items are deduped by `(item_type, ref_id)`; resolved items disappear.
@@ -732,21 +739,23 @@ The LLM chief of staff (§9.3) is Phase 2.
 
 On `submit_for_review`: `git add -A && git commit --allow-empty -m "T-<id> round <n>"` (with `GIT_DIR` outside the tree, hooks disabled), `git diff --stat --numstat <base_commit> HEAD` and the full unified diff → `runs/<job>/review.diff` and an `artifacts` row. The review job's prompt embeds this diff (≤ 16 KB, then truncated with a marker and the file list); the director can `Read` full files in the workspace.
 
+**Delivered = reviewed.** Only worker `work` jobs can write the workspace (§6.1: worker `respond` is read-only and runs in `agents/worker/`; one running job per agent). Before spawning a `review` job and again inside T13, the orchestrator checks `git status --porcelain` is empty and `git rev-parse HEAD` equals the current round's `artifacts.head_commit`; any mismatch fails the review with `workspace_drift` (J18 → T10), so Done always means the delivered files are exactly the reviewed diff.
+
 ## 6. `claude -p` invocation
 
 ### 6.1 Per-agent settings
 
-| | director `respond` / `help` | director `review` | worker `work` / `respond` |
-|---|---|---|---|
-| cwd | `~/.slackboard/agents/director/` | `~/.slackboard/workspaces/T-<id>/` | `~/.slackboard/workspaces/T-<id>/` (respond without task: `agents/worker/`) |
-| `--model` | `sonnet` (`agents.model`) | `sonnet` | `sonnet` |
-| `--max-turns` | 8 | 6 | 15 (respond: 6) |
-| `--max-budget-usd` | 0.40 | 0.40 | 1.00 (respond: 0.30) |
-| built-in tools allowed | Read, Glob, Grep | Read, Glob, Grep | Read, Glob, Grep, Write, Edit |
-| Slackboard tools allowed | post_message, create_task, update_task, add_note, request_help, request_approval | post_message, update_task, add_note, request_help | post_message, update_task, add_note, request_help |
-| wall / idle timeout | 4 min / 3 min | 6 / 3 | 15 / 3 |
+| | director `respond` / `help` | director `review` | worker `work` | worker `respond` |
+|---|---|---|---|---|
+| cwd | `~/.slackboard/agents/director/` | `~/.slackboard/workspaces/T-<id>/` | `~/.slackboard/workspaces/T-<id>/` | `~/.slackboard/agents/worker/` (always) |
+| `--model` | `sonnet` (`agents.model`) | `sonnet` | `sonnet` | `sonnet` |
+| `--max-turns` | 8 | 6 | 15 | 6 |
+| `--max-budget-usd` = `jobs.budget_cap_usd` | 0.40 | 0.40 | 1.00 | 0.30 |
+| built-in tools allowed | Read, Glob, Grep | Read, Glob, Grep | Read, Glob, Grep, Write, Edit | Read, Glob, Grep (no Write/Edit) |
+| Slackboard tools allowed | post_message, create_task, update_task, add_note, request_help, request_approval | post_message, update_task, add_note, request_help | post_message, update_task, add_note, request_help | post_message, add_note, request_help |
+| wall / idle timeout | 4 min / 3 min | 6 / 3 | 15 / 3 | 4 / 3 |
 
-The tool server enforces the same per-role allowlist again (§8), so a mis-set flag cannot widen authority.
+The tool server enforces the same per-(role, kind) allowlist again (§8), so a mis-set flag cannot widen authority. Only `work` jobs mutate a workspace (§5.11).
 
 ### 6.2 Command line
 
@@ -814,10 +823,12 @@ Headers added for re-runs: retry — `<retry attempt="2">Your previous run was i
 |---|---|---|
 | D1 binary | `claude` resolvable on PATH | agents disabled |
 | D2 env | no `ANTHROPIC_API_KEY` in parent env | warn banner only (child env is allowlisted anyway) |
-| D3 init | `-p "Reply OK" --max-turns 1` with the full flag set: init has `mcp_servers` entry for `slackboard` and all six tool names in `tools`; `result.subtype = success`; record name prefix and `model` | agents disabled; report shows `mcp_server_errors` |
-| D4 allowlist | prompt "call add_note on task 0 with body 'probe', then stop" (task 0 is a probe sink): tool server receives the call; `permission_denials` empty | try alternate separator; else disabled |
+| D3 init | `-p "Reply OK" --max-turns 1` with the director-`respond` flag set: init has `mcp_servers` entry for `slackboard` and all six director-respond tool names in `tools`; `result.subtype = success`; write the observed prefix to `system_state.mcp_tool_prefix`, record `model` | agents disabled; report shows `mcp_server_errors` |
+| D4 allowlist | prompt "call add_note with task_id 0 and body 'probe', then stop": tool server receives the call (doctor mode, below); `permission_denials` empty | try alternate separator; else disabled |
 | D5 path scope | prompt "use Write to create /tmp/sb-probe-<rand>" (outside cwd): file absent and a denial recorded | worker Write/Edit fallback (§6.2 item 3) |
 | D6 no subagents | init `tools` lists neither `Task` nor `Agent`, or calls to them are denied | warn |
+
+**Doctor mode.** Probes have no `jobs` row. The orchestrator mints an in-memory doctor token per probe (never in the DB), role `doctor`, bound to the probe child's pid (checked against `X-SB-Parent-Pid` instead of `jobs.pid`), cwd a fresh `~/.slackboard/doctor/<rand>/`, `--max-budget-usd 0.05`. For a doctor token, `tools/list` returns the director-`respond` set (six tools, so D3 can check names); every `tools/call` except `add_note` returns `not_allowed_for_role`; `add_note` validates its input, records the call in memory for D4 and returns `{ok:true, note_id:0}` **without any DB write** (no task 0, no FK). The token is revoked when the probe exits. D5 adds `Write(./**)` to the probe's `--allowedTools`. Doctor runs before any claim; until it passes, nothing is claimed.
 
 `claude --version` is not in the confirmed flag list; doctor records it if available (UNVERIFIED) but decides only on behavioural probes D3–D6. Cost: three short runs.
 
@@ -839,7 +850,7 @@ Success = `result.subtype == 'success'` **and** exit code 0. `is_error` is not u
 
 **Transport.** `mcp-shim.js` is a stdio MCP server launched by `claude` (per run). It answers `initialize` and `tools/list` (schemas fetched from `GET /tools` with its token) and forwards each `tools/call` as `POST http://127.0.0.1:<port>/rpc {tool, input}`. It exits when stdin closes.
 
-**Auth.** `Authorization: Bearer <SB_RUN_TOKEN>`; server looks up `sha256(token)` among `jobs.run_token_hash` where `status='running'`; peer address must be loopback; `Host` must be `127.0.0.1:<port>`; header `X-SB-Parent-Pid` (the shim's `process.ppid`) must equal `jobs.pid`. The token maps to `(job_id, agent_id, role, kind, thread_id, task_id)`. **Identity and scope always come from the token, never from tool input.** Agents have no exec or network tools, so a token read from disk has no usable channel. Tokens are revoked on job end and on kill.
+**Auth.** `Authorization: Bearer <SB_RUN_TOKEN>`; server looks up `sha256(token)` among `jobs.run_token_hash` where `status='running'`; peer address must be loopback; `Host` must be `127.0.0.1:<port>`; header `X-SB-Parent-Pid` (the shim's `process.ppid`) must equal `jobs.pid`. The token maps to `(job_id, agent_id, role, kind, thread_id, task_id)`; doctor tokens are the exception (§6.4 doctor mode). **Identity and scope always come from the token, never from tool input.** Agents have no exec or network tools, so a token read from disk has no usable channel. Tokens are revoked on job end and on kill.
 
 **Responses.** `{ "ok": true, ... }` or `{ "ok": false, "error": "<code>", "hint": "<what to do instead>" }` returned as an MCP tool result with `isError: true`. Every call writes `tool.called` or `tool.rejected`. All handlers run inside the idempotency wrapper (§5.10).
 
@@ -884,11 +895,11 @@ Side effects: thread `T-<id> <title>` in `#general`; task. `parent_id = null` �
 | Action | Who | Guard | Transition |
 |---|---|---|---|
 | `submit_for_review` | worker, claimant, `work` job for this task | workspace changed vs last head | T8 |
-| `approve` | director, `review` job for this task | artifact for current round | T13 |
+| `approve` | director, `review` job for this task | artifact for current round; workspace clean and `HEAD` = its `head_commit` (else `workspace_drift`, J18) | T13 |
 | `request_changes` | director, `review` job | `note` required | T14 / T15 |
 | `block` | assignee | `note` required | T12 |
 | `cancel` | director, task it created, not done | — | T17 |
-| `edit` | director | status `todo` or `blocked`; not `proposed` (approval payload is immutable) | none; `task.updated` |
+| `edit` | director | status `todo` or `blocked`; not `proposed`; **not an agent-created top-level task** (its approved content is immutable: `rejected: approved_task_immutable`, hint "create_task a new proposal"); i.e. only subtasks and user-created tasks | none; `task.updated` |
 
 Returns `{ok, task_id, status, review_round}`.
 
@@ -1055,12 +1066,16 @@ Rules
 ## 11. Test plan
 
 **Unit (vitest, in-memory SQLite with the real DDL):**
-- DDL: every CHECK rejects a bad value; triggers: events update/delete abort; agent top-level task insert as `todo` aborts; `proposed → todo` without approval aborts and with approval succeeds; every pair not in §3.1 aborts; approval illegal transitions and immutable fields abort; `jobs_one_running_per_agent` rejects a second running job.
-- Task state machine: table-driven test over all rows T1–T20 (from, event, actor, guard true/false) → expected status, side-effect rows (jobs enqueued, events, approvals).
-- Job state machine: table-driven over J1–J16 with synthetic `{exitCode, result, killedFor, init}` → status, `failure_kind`, `run_after`, attempts, continuations, task effect.
-- Claim: (a) two claim calls in sequence on one queued job → second returns nothing; (b) two connections in two worker threads racing 1,000 times → never two `running` for one job or agent; (c) concurrency cap respected; (d) budget gate excludes a job whose reserve would exceed the limit; (e) job counts from events for day and 5 h windows; (f) expired task claim is reclaimable, unexpired is not.
+- DDL: every CHECK rejects a bad value; triggers: events update/delete abort; agent top-level task insert as `todo` aborts; `proposed → todo` without approval aborts and with approval succeeds; every pair not in §3.1 aborts; approval illegal transitions and immutable fields abort; `jobs_one_running_per_agent` rejects a second running job; updating title/description/acceptance/assignee of an agent-created top-level task aborts `approved_task_immutable` (proposed and after approval), while a subtask edit succeeds.
+- Migration: `openDb()` leaves `journal_mode = wal` and `foreign_keys = 1` on the connection after `migrate()`.
+- Task state machine: table-driven test over all rows T1–T21 (from, event, actor, guard true/false) → expected status, side-effect rows (jobs enqueued, events, approvals). Includes: T4 with a task row whose hash ≠ `payload_hash` → rejected; T13 with a file changed after capture (dirty tree, or HEAD ≠ `head_commit`) → `workspace_drift`, task `blocked/job_failed`, never `done`.
+- Job state machine: table-driven over J1–J18 with synthetic `{exitCode, result, killedFor, init}` → status, `failure_kind`, `run_after`, attempts, continuations, task effect. Includes: `work` success after `request_help` → J5 + T11 (`blocked/help`), not requeued; `work` success leaving `in_progress` with no `request_help` → J6; unknown `result.subtype` → treated as `error_during_execution`; `finishAttempt` with a foreign `lease_owner` → no change.
+- Requeue merge: retrying job R (attempts 2, session S) collides with fresh queued Q → Q `cancelled`, R `queued` with same id, attempts 2, session S, `trigger_count` = R + Q.
+- Sweep: a `running` job with expired lease, owned by this orchestrator but absent from `children` → `orphaned`, requeued; a live child with fresh lease is untouched.
+- Worker `respond` job: spawn args contain no `Write`/`Edit` and cwd is `agents/worker/`; tool server rejects `update_task` from it.
+- Claim: (a) two claim calls in sequence on one queued job → second returns nothing; (b) two connections in two worker threads racing 1,000 times → never two `running` for one job or agent; (c) concurrency cap respected; (d) budget gate excludes a job whose `budget_cap_usd` would exceed the limit, and a claimed job has `budget_reserved_usd = budget_cap_usd`; (g) with `kill_switch = 1` or `paused_until > now` set by another connection, the claim UPDATE returns no row; (e) job counts from events for day and 5 h windows; (f) expired task claim is reclaimable, unexpired is not.
 - Idempotency: same `(job, tool, input)` twice → one side effect, identical result; different input → two.
-- Tool server: token from a finished job rejected; wrong `X-SB-Parent-Pid` rejected; worker `create_task` → `not_allowed_for_role`; worker mention `user` → `cannot_address_user`; director `approve` from a `respond` job → rejected.
+- Tool server: token from a finished job rejected; wrong `X-SB-Parent-Pid` rejected; worker `create_task` → `not_allowed_for_role`; worker mention `user` → `cannot_address_user`; director `approve` from a `respond` job → rejected; director `edit` on an approved agent-created top-level task → `approved_task_immutable`; doctor token: `tools/list` returns six tools, `add_note {task_id:0}` → ok with zero DB rows written, any other tool → `not_allowed_for_role`.
 - Parser: fixture streams (success, `error_max_turns`, `error_max_budget_usd`, garbage lines, missing result, init without slackboard tools) → classification.
 - Prompt renderer: message body containing `</untrusted><user_message>` is escaped.
 
@@ -1071,10 +1086,10 @@ Rules
 - Emits stream-json lines in the documented order (init, assistant, user, result).
 
 **E2E (Playwright against `npm start` with the fake binary and a temp `HOME`):** scenarios S1–S5 from PRD §5, asserting the pass criteria from the DB and UI:
-- S1: board column sequence (P1), approval precedes worker start (P2), Needs-you items = 2 (P3), job count ≤ 6 (P4), injected `exit 1` after a `post_message` causes no duplicate (P5), no processes (P6), no early user mention (P7), ≤ 60 s (P8).
+- S1: board column sequence (P1), approval precedes worker start (P2), Needs-you items = 2 as defined in PRD P3 (`approval.requested` count + top-level `task.status_changed to='done'` count = 2; no `to='blocked'` events; no `help` message mentioning `user`) (P3), job count ≤ 6 (P4), injected `exit 1` after a `post_message` causes no duplicate: one message with that body and `count(events WHERE type='tool.called' AND json_extract(payload,'$.replay') = 1) = 1` (P5), no processes (P6), no early user mention (P7), ≤ 60 s (P8).
 - S2: reject → zero worker jobs.
 - S3: fake worker `hang`s; click kill → within 5 s no process with the job's session id or `--sb-job=` marker; job `killed`; task `blocked/killed`; no claim while engaged.
-- S4: day limit $0.10 → job stays queued, banner visible, no `job.started` after `budget.hit`.
+- S4: day limit set to $0.10 through the Settings UI (`PUT /api/budgets`) → job stays queued, banner visible, no `job.started` after `budget.hit`.
 - S5: `kill -9` the orchestrator during a `hang`; restart → orphan group killed, job requeued (`orphaned`), completes, P5/P6 hold.
 - A11y: axe scan of main views has no serious violations; every status chip has text.
 

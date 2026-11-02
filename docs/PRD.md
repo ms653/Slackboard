@@ -22,7 +22,7 @@ Single user: the machine owner, logged in to their own Pro/Max subscription in t
 | U6 | see what the reviewer saw (server-captured diff) and its verdict | I can trust or overrule the review | yes |
 | U7 | see each agent's presence (idle, working, blocked, failed, paused) | I know where things are stuck | yes |
 | U8 | hit one kill switch that stops every agent process immediately | I can stop a runaway in seconds | yes |
-| U9 | set a daily budget and job caps and see estimated spend | agents do not eat my whole subscription allowance | yes |
+| U9 | set a daily budget and job caps in a Settings screen and see estimated spend | agents do not eat my whole subscription allowance | yes |
 | U10 | be asked when an agent is stuck instead of it guessing | failures surface early (MAST "fail to ask") | yes (to director or user) |
 | U11 | have the director spawn extra workers on demand | parallel work | Phase 2 |
 | U12 | have workers ask peer workers for help | less escalation to me | Phase 2 |
@@ -33,8 +33,8 @@ Single user: the machine owner, logged in to their own Pro/Max subscription in t
 - **Agents:** exactly 1 director (`director`) and 1 worker (`worker`). The chief of staff in MVP is **deterministic server rules** (§6), not an LLM; its prompt is specified in TECH.md for Phase 2.
 - **Channels:** exactly 1 channel, `#general`. Every message belongs to a thread; each task has exactly one thread.
 - **Board:** columns Proposed, To do, In progress, In review, Blocked, Done (Cancelled hidden behind a filter).
-- **Work type:** file-producing tasks inside a per-task git workspace (docs, code drafts). Worker tools: Read, Glob, Grep, Write, Edit plus the Slackboard MCP tools. **No Bash, no web, no email, no external integrations.**
-- **Review:** every worker deliverable is reviewed by the director against a server-captured diff before the task can be Done. Max 2 review rounds, then escalation to the user.
+- **Work type:** file-producing tasks inside a per-task git workspace (docs, code drafts). Worker tools in `work` jobs: Read, Glob, Grep, Write, Edit plus the Slackboard MCP tools; worker chat (`respond`) jobs are read-only and run outside the workspace. **No Bash, no web, no email, no external integrations.**
+- **Review:** every worker deliverable is reviewed by the director against a server-captured diff before the task can be Done. Max 2 review rounds, then escalation to the user. **Invariant: Done means the delivered files equal the reviewed diff** (the server refuses Done if the workspace changed after capture; TECH.md §5.11).
 - **Guardrails:** per-thread message and job caps, per-job turn and budget caps, daily and 5-hour job caps, daily estimated-USD budget, kill switch, approvals.
 - **Runtime:** Next.js app on 127.0.0.1 plus a separate orchestrator Node process, both on one SQLite file (WAL).
 
@@ -69,9 +69,9 @@ Run as an automated e2e test with a fake `claude` binary (deterministic, TECH.md
 |---|---|---|
 | P1 | Board shows the task in order Proposed → To do → In progress → In review → To do → In progress → In review → Done | `events` rows of type `task.status_changed` for that task, in order |
 | P2 | No worker job starts before the approval is `approved` | `jobs.started_at` (worker) > `approvals.decided_at` |
-| P3 | Exactly 1 user decision needed before delivery (the approval), plus 1 "Ready" item after | Needs-you items created = 2 |
+| P3 | Exactly 1 user decision needed before delivery (the approval), plus 1 "Ready" item after | `count(events type='approval.requested')` + `count(events type='task.status_changed', to='done', top-level task)` = 2; zero `task.status_changed` to `blocked`; zero `help` messages mentioning `user` |
 | P4 | Total jobs ≤ 6 (director respond, worker work ×2, director review ×2, + ≤1 slack) | `SELECT count(*) FROM jobs` |
-| P5 | No duplicate side effects after one injected retry (fake binary exits 1 once mid-run after a `post_message`) | messages with same body in thread = 1; `tool_calls` dedupe hit = 1 |
+| P5 | No duplicate side effects after one injected retry (fake binary exits 1 once mid-run after a `post_message`) | messages with same body in thread = 1; `count(events type='tool.called' AND payload.replay = true)` = 1 |
 | P6 | Zero `claude` processes remain after the scenario | process scan for the run session ids |
 | P7 | Every agent message is visible in the thread; no agent message addressed to the user before review approval | `messages` where `author_kind='agent'` and mentions user and created before task done = 0 (except the approval request) |
 | P8 | Wall clock ≤ 60 s with fake binary; ≤ 15 min, ≤ $3.00 est., zero unexpected `permission_denials` with real binary | timers, `jobs.cost_usd`, `jobs.permission_denials` |
@@ -80,7 +80,7 @@ Run as an automated e2e test with a fake `claude` binary (deterministic, TECH.md
 
 **Scenario S3 (kill switch):** press kill during worker job → within 5 s no `claude` process for any running job, job `killed`, task `blocked` with reason `killed`, no job claimed while kill is on. Pass: all four.
 
-**Scenario S4 (budget hit):** daily limit set below one job's cap → job stays queued, UI shows budget banner, no spawn. Pass: zero `running` transitions after the hit event.
+**Scenario S4 (budget hit):** daily limit set below one job's cap by the user in the Settings screen (UX.md §12, `PUT /api/budgets`) → job stays queued, UI shows budget banner, no spawn. Pass: zero `running` transitions after the hit event.
 
 **Scenario S5 (crash recovery):** `kill -9` the orchestrator mid-worker-job, restart → orphaned `claude` process group killed, job retried, task returns to In progress, no duplicate messages. Pass: P5 and P6 hold.
 
@@ -94,6 +94,10 @@ Run as an automated e2e test with a fake `claude` binary (deterministic, TECH.md
 | Anything that sends (email, DM, message outside Slackboard) | `send` | No tool can do it. Agent may `request_approval`; on approve the user gets the exact payload to act on manually |
 | Anything that spends money or allowance beyond limits (extra usage credits, raising a budget, overriding a cap) | `spend` / `budget_increase` | Budget changes only via the user's Settings UI; agent requests are records only |
 | Anything that posts externally (GitHub, Slack, web forms) | `post_external` | Same as `send` |
+
+**Approved means exactly this:** an agent-created top-level task's title, description, acceptance criteria and assignee cannot change once proposed or approved (DB trigger + tool server; TECH.md §2, §8.3). To change scope the director proposes a new task.
+
+**Review limit (decision, user may override):** when the director still requests changes after round 2, the user may **Send back with a note** (task returns to To do, rounds reset) or **Cancel**. There is **no "Accept anyway"** in MVP: unreviewed work never becomes Done.
 
 **Does not need approval:** user-created tasks (the user is acting), director-created subtasks under an approved/user-created task, messages inside Slackboard, file edits inside the task's own workspace.
 
