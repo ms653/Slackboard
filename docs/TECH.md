@@ -44,14 +44,14 @@ Decisions:
 
 ## 2. SQLite DDL
 
-Applied by `lib/db/migrate.ts` (`user_version` = 1) in one transaction; SQLite resolves table names in trigger bodies and FK targets when they execute, so forward references (e.g. `messages.job_id`, triggers on `tasks` reading `approvals`) are valid. Timestamps are Unix ms. Actor strings: `'user'`, `'system'`, or an agent id.
+`lib/db/openDb()` runs these on every new connection, **outside any transaction** (`journal_mode=WAL` fails inside one and `foreign_keys` is a no-op inside one), before migration or any other statement:
+```sql
+PRAGMA journal_mode = WAL;  PRAGMA synchronous = NORMAL;
+PRAGMA foreign_keys = ON;   PRAGMA busy_timeout = 5000;
+```
+`lib/db/migrate.ts` then applies the DDL below, the seeds and `PRAGMA user_version = 1` in one transaction (DDL, seeds and `user_version` only). SQLite resolves table names in trigger bodies and FK targets when they execute, so forward references (e.g. `messages.job_id`, triggers on `tasks` reading `approvals`) are valid. Timestamps are Unix ms. Actor strings: `'user'`, `'system'`, or an agent id.
 
 ```sql
-PRAGMA journal_mode = WAL;
-PRAGMA synchronous = NORMAL;
-PRAGMA foreign_keys = ON;      -- set on every connection
-PRAGMA busy_timeout = 5000;    -- set on every connection
-
 -- ───────────────────────── agents ─────────────────────────
 CREATE TABLE agents (
   id              TEXT PRIMARY KEY
@@ -194,6 +194,14 @@ WHEN OLD.status = 'proposed' AND NEW.status NOT IN ('proposed','cancelled')
                    AND a.status IN ('approved','consumed'))
 BEGIN SELECT RAISE(ABORT, 'approval_required'); END;
 
+-- Approval gate 3: the approved content of an agent-created top-level task never changes
+-- (proposed: approval payload is the source; after approval: the worker must run exactly what was approved).
+CREATE TRIGGER tasks_agent_toplevel_immutable BEFORE UPDATE OF title, description, acceptance, assignee_agent_id ON tasks
+WHEN OLD.parent_id IS NULL AND OLD.created_by_kind = 'agent'
+ AND (NEW.title IS NOT OLD.title OR NEW.description IS NOT OLD.description
+      OR NEW.acceptance IS NOT OLD.acceptance OR NEW.assignee_agent_id IS NOT OLD.assignee_agent_id)
+BEGIN SELECT RAISE(ABORT, 'approved_task_immutable'); END;
+
 -- Legal transitions only (mirror of §3.1; guards beyond this live in lib/domain).
 CREATE TRIGGER tasks_legal_transition BEFORE UPDATE OF status ON tasks
 WHEN OLD.status <> NEW.status AND (OLD.status || '>' || NEW.status) NOT IN (
@@ -266,6 +274,7 @@ CREATE TABLE jobs (
   last_output_at      INTEGER,
   pid                 INTEGER,                       -- also the process-group id (detached spawn)
   run_token_hash      TEXT,                          -- sha256 hex; NULL when not running
+  budget_cap_usd      REAL NOT NULL CHECK (budget_cap_usd > 0 AND budget_cap_usd <= 5),  -- set at enqueue from §6.1 (role, kind); passed as --max-budget-usd
   budget_reserved_usd REAL NOT NULL DEFAULT 0 CHECK (budget_reserved_usd >= 0),
   cost_usd            REAL NOT NULL DEFAULT 0 CHECK (cost_usd >= 0),   -- sum over attempts, estimate
   num_turns           INTEGER,
@@ -276,7 +285,7 @@ CREATE TABLE jobs (
                         ('exit_nonzero','no_result','error_during_execution','max_turns','max_budget',
                          'no_handoff','timeout_wall','timeout_idle','orphaned','lease_lost',
                          'mcp_not_connected','tools_missing','usage_limit','spawn_error',
-                         'thread_capped','task_not_claimable','killed','cancelled')),
+                         'thread_capped','task_not_claimable','workspace_drift','killed','cancelled')),
   permission_denials  INTEGER NOT NULL DEFAULT 0,
   error               TEXT,
   created_at          INTEGER NOT NULL,
@@ -422,7 +431,9 @@ CREATE VIEW needs_you AS
      AND NOT EXISTS (SELECT 1 FROM messages u
                      WHERE u.thread_id = m.thread_id AND u.author_kind = 'user' AND u.id > m.id)
   UNION ALL
-  SELECT 'failure', t.id, t.thread_id, t.id, t.updated_at
+  SELECT CASE t.blocked_reason WHEN 'review_cap' THEN 'review_cap'
+                               WHEN 'killed'     THEN 'killed' ELSE 'failure' END,
+         t.id, t.thread_id, t.id, t.updated_at
     FROM tasks t WHERE t.status = 'blocked' AND t.blocked_reason IN ('job_failed','killed','review_cap','agent_blocked')
   UNION ALL
   SELECT 'ready', t.id, t.thread_id, t.id, t.updated_at
@@ -430,6 +441,8 @@ CREATE VIEW needs_you AS
   UNION ALL
   SELECT 'thread_capped', th.id, th.id, NULL, th.created_at
     FROM threads th WHERE th.status = 'capped';
+-- Not a Needs-you item (view stays pending-only): GET /api/bootstrap also returns "Recently expired"
+--   SELECT * FROM approvals WHERE status = 'expired' AND decided_at >= :now - 86400000;
 ```
 
 Seed (MVP): channel `general`; agents `director` (role director, `sonnet`, max_turns 8, max_budget_usd 0.40) and `worker` (role worker, `sonnet`, 15, 1.00); budgets: global/day `limit_usd=5.00, limit_jobs=60`; global/rolling_5h `limit_jobs=25`.
@@ -445,23 +458,24 @@ Guards are enforced in `lib/domain` inside one `BEGIN IMMEDIATE` transaction; th
 | T1 | — | create (user) | todo | assignee set (default `worker`) | thread in `#general`; workspace init (§4); enqueue `work` |
 | T2 | — | `create_task`, parent null (director) | proposed | — | thread; approval `create_top_level_task` pending, expires 24 h; Needs-you item |
 | T3 | — | `create_task`, parent set (director) | todo | parent not `proposed/done/cancelled`; depth ≤ 1 | thread; workspace init; enqueue `work` |
-| T4 | proposed | approval approved (user) | todo | approval `approved` (trigger) | workspace init; enqueue `work` |
+| T4 | proposed | approval approved (user) | todo | approval `approved` (trigger); `sha256(canonical {title, description, acceptance, assignee})` of the task row = `payload_hash` | workspace init; enqueue `work`. From here title/description/acceptance/assignee are immutable (trigger `tasks_agent_toplevel_immutable`) |
 | T5 | proposed | approval rejected / expired | cancelled | — | system message; director not woken |
 | T6 | todo | claim (orchestrator, `work` job) | in_progress | job.agent = assignee; claim free or expired | `claimed_by`, `claim_expires_at = now+60s` |
 | T7 | in_progress | heartbeat | in_progress | claimed_by = job.agent | extend claim |
 | T8 | in_progress | `update_task submit_for_review` (worker) | in_review | caller = claimant; `review_round < 2`; workspace has changes vs last head | capture artifact (§5.11); `review_round += 1`; clear claim; enqueue director `review` |
 | T9 | in_progress | job attempt failed, retryable / claim expired | todo | attempts < max | clear claim; job requeued with backoff |
-| T10 | in_progress | job failed terminally / `no_handoff` twice | blocked (`job_failed`) | — | clear claim; Needs-you failure |
+| T10 | in_progress, in_review | job failed terminally / `no_handoff` twice / `review` job failed `workspace_drift` (§5.11) | blocked (`job_failed`) | — | clear claim; Needs-you failure |
 | T11 | in_progress | worker job ends after a `request_help` in that job | blocked (`help`) | — | clear claim; help message already posted; director `help` job enqueued at call time |
 | T12 | in_progress, todo | `update_task block` (assignee) | blocked (`agent_blocked`) | note required | clear claim; Needs-you failure |
-| T13 | in_review | `update_task approve` (director, `review` job for this task) | done | caller ≠ author of the round (worker); artifact for current round exists | artifact verdict; director's user-facing summary allowed; Needs-you `ready` (top-level only); if all subtasks of parent done, post to parent thread |
+| T13 | in_review | `update_task approve` (director, `review` job for this task) | done | caller ≠ author of the round (worker); artifact for current round exists; workspace `git status --porcelain` empty **and** `rev-parse HEAD` = that artifact's `head_commit` (else `rejected: workspace_drift`, review job fails → T10) | artifact verdict; director's user-facing summary allowed; Needs-you `ready` (top-level only); if all subtasks of parent done, post to parent thread |
 | T14 | in_review | `update_task request_changes` (director) | todo | note required; `review_round < 2` | artifact verdict; feedback as `review` message + note; enqueue `work` |
-| T15 | in_review | `request_changes` (director) | blocked (`review_cap`) | `review_round = 2` | Needs-you failure "Review limit reached" |
-| T16 | blocked | unblock or user reply in the task thread (user); director `post_message` with `wake` to worker on a `help`-blocked task | todo | director only for reason `help` | `review_round = 0` if reason `review_cap`; enqueue `work` |
+| T15 | in_review | `request_changes` (director) | blocked (`review_cap`) | `review_round = 2` | Needs-you `review_cap` "Review limit reached" (user: Send back with note = T16, or Cancel = T17; no accept-anyway, PRD §6) |
+| T16 | blocked | unblock or user reply in the task thread (user); director `post_message` with `wake` to worker on a `help`-blocked task; "Retry all" after kill (user, every `blocked/killed` task in one txn) | todo | director only for reason `help`; note required for reason `review_cap` | `review_round = 0` if reason `review_cap`; enqueue `work` |
 | T17 | any non-terminal | cancel (user; director for tasks it created) | cancelled | — | kill running job for task (`cancelled`); cancel queued jobs |
 | T18 | done | reopen with note (user) | todo | — | `accepted_at = NULL`, `review_round = 0`; note; enqueue `work` |
 | T19 | done | accept (user) | done | top-level | `accepted_at = now`; close thread |
 | T20 | in_progress | kill switch | blocked (`killed`) | — | clear claim |
+| T21 | in_progress, in_review | user cancels the task's running `work`/`review` job (J17) | blocked (`user`) | — | clear claim; no Needs-you item (user acted) |
 
 User-allowed moves on the board: T16, T17, T18, T19 only. Users cannot move `in_review → done` (review cannot be skipped); they can Reopen after Done.
 
@@ -470,11 +484,11 @@ User-allowed moves on the board: T16, T17, T18, T19 only. Users cannot move `in_
 | # | From | Event | To | Guard | Side effects |
 |---|---|---|---|---|---|
 | J1 | — | trigger (§5.1) | queued | no queued job for (agent, thread, kind) else coalesce | `trigger_count += 1` on coalesce; `job.enqueued` |
-| J2 | queued | claim | running | kill off; not paused; budget gate (§5.5); running < `max_concurrency`; agent has no running job; agent enabled; thread `agent_job_count < max_agent_jobs`; for `work`: task claimable (T6) | lease 60 s; `attempts += 1`; token issued; reserve `max_budget_usd`; `thread.agent_job_count += 1`; spawn |
+| J2 | queued | claim | running | kill off; not paused (both inside the claim txn, §5.3); budget gate (§5.5); running < `max_concurrency`; agent has no running job; agent enabled; thread `agent_job_count < max_agent_jobs`; for `work`: task claimable (T6); for `review`: workspace clean and `HEAD` = current-round `artifacts.head_commit` (checked before spawn, else J18) | lease 60 s; `attempts += 1`; token issued; `budget_reserved_usd = budget_cap_usd`; `thread.agent_job_count += 1`; spawn |
 | J3 | queued | thread job cap reached | cancelled (`thread_capped`) | — | thread → `capped` |
-| J4 | queued | task cancelled/done or kill-cancel | cancelled | — | — |
-| J5 | running | `result.subtype = success`, exit 0, handoff ok | succeeded | for `work`: task left `in_progress`; for `review`: verdict given | record cost/turns; release reservation |
-| J6 | running | success but `work` left task `in_progress`, or `review` gave no verdict | queued (`no_handoff`) | `continuations = 0` | `continuations = 1`; continuation prompt; `run_after = now` |
+| J4 | queued | task cancelled/done, kill-cancel, or user "Cancel job" | cancelled | — | — |
+| J5 | running | `result.subtype = success`, exit 0, handoff ok | succeeded | for `work`: task status no longer `in_progress` after the job (T8/T11/T12 happened); for `review`: verdict given | record cost/turns; release reservation |
+| J6 | running | success, but `work` left task `in_progress` **and** no `request_help` in this job's `tool_calls`; or `review` gave no verdict | queued (`no_handoff`) | `continuations = 0` | `continuations = 1`; continuation prompt; `run_after = now` |
 | J7 | running | as J6 | failed | `continuations = 1` | T10 |
 | J8 | running | `error_max_turns` | queued | `continuations = 0` | `--resume` with "finish now" prompt (§6.3) |
 | J9 | running | `error_max_turns` | failed (`max_turns`) | `continuations = 1` | T10 |
@@ -485,8 +499,12 @@ User-allowed moves on the board: T16, T17, T18, T19 only. Users cannot move `in_
 | J14 | running | usage limit suspected (§5.6) | queued (`usage_limit`) | — | `attempts -= 1`; `system_state.paused_until = now+30min` |
 | J15 | running | kill switch | killed | — | SIGTERM → SIGKILL group; T20 |
 | J16 | running | task cancelled (user) | cancelled | — | kill group |
+| J17 | running | user "Cancel job" (`POST /api/jobs/:id`) | cancelled | — | kill group; T21 for `work`/`review` |
+| J18 | running / claimed `review` | workspace dirty or `HEAD` ≠ current-round `head_commit` (pre-spawn check, or `approve` rejected `workspace_drift`) | failed (`workspace_drift`) | — | no retry; T10 |
 
-All terminal transitions: revoke token (`run_token_hash = NULL`), clear lease, `finished_at`, `job.finished` and `job.attempt_finished {cost_usd, num_turns, subtype}` events, update agent presence. Requeue (J6, J8, J11, J14): if another queued job exists for (agent, thread, kind), merge into it (sum `trigger_count`, cancel this one) to respect `jobs_one_queued`.
+`finishAttempt` order: if the `work` job called `request_help` (in `tool_calls`), apply T11 first and classify J5; only then test J6/J7. `finishAttempt` normalises any unknown `result.subtype` to `error_during_execution`, and every update it makes is guarded `WHERE id=:id AND status='running' AND lease_owner=:me` (0 rows → another owner recovered it; do nothing).
+
+All terminal transitions: revoke token (`run_token_hash = NULL`), clear lease, `finished_at`, `job.finished` and `job.attempt_finished {cost_usd, num_turns, subtype}` events, update agent presence. Requeue (J6, J8, J11, J14): if another queued job exists for (agent, thread, kind), **cancel that other job** (`failure_kind = 'cancelled'`), add its `trigger_count` to the retrying job, then flip the retrying job to `queued`, keeping its id, `attempts`, `continuations` and `session_id` (so §5.10 idempotency, the attempt bound and `--resume` hold).
 
 ### 3.3 Thread
 
@@ -536,6 +554,8 @@ Before each spawn the orchestrator deletes `CLAUDE.md`, `CLAUDE.local.md`, `.mcp
 | Director `post_message` with `wake: true` mentioning `worker` | task `blocked/help` → T16 → `work`; otherwise `respond` for worker, only if the thread's task is non-terminal and assigned to it | 90 |
 | Anything else: agent messages without `wake`, worker messages, system messages, approvals of `send/spend/...` | none | — |
 
+These rules live once in `lib/domain/wakePreview(thread, mentions, author)` → `{agent, kind, unblocksTask?} | null` plus the thread's `agent_job_count/max_agent_jobs`; `POST /api/messages` enqueues from it and the UI composer hint (UX.md §6) renders it, so the hint cannot disagree with what runs. A capped or closed thread returns `null` (no claim can happen there).
+
 Workers can never wake the director by chatting (only via `request_help` or `submit_for_review`), and nobody wakes on acknowledgments: this removes the acknowledgment-loop class (research.md §3).
 
 ### 5.2 Main loop
@@ -580,8 +600,9 @@ UPDATE jobs
    SET status = 'running', attempts = attempts + 1,
        lease_owner = :me, lease_expires_at = :now + 60000, heartbeat_at = :now,
        last_output_at = :now, started_at = :now, finished_at = NULL,
-       run_token_hash = :token_hash, budget_reserved_usd = :reserve, error = NULL, failure_kind = NULL
+       run_token_hash = :token_hash, budget_reserved_usd = budget_cap_usd, error = NULL, failure_kind = NULL
  WHERE status = 'queued'
+   AND (SELECT kill_switch = 0 AND ifnull(paused_until, 0) <= :now FROM system_state WHERE id = 1)
    AND id = (
      SELECT j.id FROM jobs j
        JOIN agents a  ON a.id = j.agent_id
@@ -592,14 +613,14 @@ UPDATE jobs
         AND NOT EXISTS (SELECT 1 FROM jobs r WHERE r.status = 'running' AND r.agent_id = j.agent_id)
         AND (j.task_id IS NULL OR (SELECT status FROM tasks k WHERE k.id = j.task_id)
                                     IN ('todo','in_progress','in_review','blocked'))
-        AND :spent_day + :reserved_running + a.max_budget_usd <= :limit_usd_day
+        AND :spent_day + :reserved_running + j.budget_cap_usd <= :limit_usd_day
         AND :jobs_day < :limit_jobs_day AND :jobs_5h < :limit_jobs_5h
       ORDER BY j.priority, j.id
       LIMIT 1)
    AND (SELECT count(*) FROM jobs WHERE status = 'running') < :max_concurrency
 RETURNING *;
 ```
-`:reserve` is bound to the claimed agent's `max_budget_usd` (looked up in the same txn before the UPDATE; for a single candidate the value is identical). If the gate excludes all queued jobs while some are runnable, emit `budget.hit` once per window and set presences `paused`.
+The kill/pause check is inside the UPDATE so a `POST /api/kill` committed between `tick()`'s read and the claim cannot be missed; `spawnJob` re-reads `system_state.kill_switch` immediately before `spawn()` and, if set, finishes the job as J15 without spawning. The reservation is the job's own `budget_cap_usd`, the same value passed as `--max-budget-usd`. If the gate excludes all queued jobs while some are runnable, emit `budget.hit` once per window and set presences `paused`.
 
 Same transaction, for `work` jobs (T6):
 ```sql
@@ -631,12 +652,17 @@ function kill(c, why) {           // whole process group: claude + MCP shim + an
   setTimeout(() => { try { process.kill(-c.pid, 'SIGKILL'); } catch {} }, 3000);
 }
 function sweep() {               // every 5 s
-  // expired task claims with no running job -> T9; expired leases owned by another id -> orphan recovery
+  // expired task claims with no running job -> T9
+  // orphaned jobs, REGARDLESS of lease_owner (covers our own crash between claim and spawn, or a
+  // finishAttempt that threw): status='running' AND lease_expires_at < now AND id NOT IN children
+  //   -> sweepByMarker(`--sb-job=${id}`); finishAttempt(job, {failure:'orphaned'}) with the owner guard
+  //      relaxed to lease_owner = <the row's current owner> (J11)
   // pending approvals past expires_at -> 'expired' (decided_by='system') -> T5
 }
 ```
+Our own live children always have a fresh lease (heartbeat every 15 s), so the sweep never touches them.
 
-On child `close(code, signal)`: `finishAttempt(job, {exitCode, signal, result: c.result, killedFor: c.killedFor, init: c.init, sawUsageLimit: c.sawUsageLimit})` in one IMMEDIATE txn, which applies §3.2, writes `job.attempt_finished` with `cost_usd` (the budget ledger), releases the reservation, and applies the task side effects.
+On child `close(code, signal)`: `finishAttempt(job, {exitCode, signal, result: c.result, killedFor: c.killedFor, init: c.init, sawUsageLimit: c.sawUsageLimit})` in one IMMEDIATE txn (guarded `lease_owner = :me`, §3.2), which applies §3.2, writes `job.attempt_finished` with `cost_usd` (the budget ledger), releases the reservation, and applies the task side effects.
 
 ### 5.5 Budgets
 
@@ -650,7 +676,7 @@ All money figures are `total_cost_usd` estimates (ASSUMPTIONS.md §1), labelled 
 :jobs_day         = SELECT count(*) FROM events WHERE type='job.started' AND ts >= :local_midnight;
 :jobs_5h          = SELECT count(*) FROM events WHERE type='job.started' AND ts >= :now - 18000000;
 ```
-Reserving the full per-job cap covers `--max-budget-usd` overshoot by one response (research.md §2) except in the worst case; a running job is never killed for the daily budget (it has its own cap). Per-agent rows in `budgets` are applied the same way if present. Raising a limit is a user action (`PUT /api/budgets`, confirm dialog); agents can only file a `budget_increase` approval, which in MVP is a record the user acts on in Settings.
+Reserving the full per-job cap (`jobs.budget_cap_usd`) covers `--max-budget-usd` overshoot by one response (research.md §2) except in the worst case; a running job is never killed for the daily budget (it has its own cap). Per-agent rows in `budgets` are applied the same way if present. Raising a limit is a user action (`PUT /api/budgets`, confirm dialog); agents can only file a `budget_increase` approval, which in MVP is a record the user acts on in Settings.
 
 ### 5.6 Retry, backoff, usage limits
 
