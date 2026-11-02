@@ -67,11 +67,11 @@ Run as an automated e2e test with a fake `claude` binary (deterministic, TECH.md
 
 | ID | Criterion | How measured |
 |---|---|---|
-| P1 | Board shows the task in order Proposed → To do → In progress → In review → To do → In progress → In review → Done | `events` rows of type `task.status_changed` for that task, in order |
+| P1 | Board shows the task in order Proposed → To do → In progress → In review → To do → In progress → In review → Done | that task's `task.created` event (`payload.status = 'proposed'`), followed by its `task.status_changed` rows in id order with `to` = todo, in_progress, in_review, todo, in_progress, in_review, done (exact; no other rows) |
 | P2 | No worker job starts before the approval is `approved` | `jobs.started_at` (worker) > `approvals.decided_at` |
 | P3 | Exactly 1 user decision needed before delivery (the approval), plus 1 "Ready" item after | `count(events type='approval.requested')` + `count(events type='task.status_changed', to='done', top-level task)` = 2; zero `task.status_changed` to `blocked`; zero `help` messages mentioning `user` |
 | P4 | Total jobs ≤ 6 (director respond, worker work ×2, director review ×2, + ≤1 slack) | `SELECT count(*) FROM jobs` |
-| P5 | No duplicate side effects after one injected retry (fake binary exits 1 once mid-run after a `post_message`) | messages with same body in thread = 1; `count(events type='tool.called' AND payload.replay = true)` = 1 |
+| P5 | No duplicate side effects after one injected retry (fake binary, director `respond` job of step 3, attempt 1 only: `post_message`, then exit 1 before `create_task`; the retry repeats that `post_message` then creates the task, so no task status flips and P1 stays exact) | messages with same body in thread = 1; `count(events type='tool.called' AND payload.replay = true)` = 1 |
 | P6 | Zero `claude` processes remain after the scenario | process scan for the run session ids |
 | P7 | Every agent message is visible in the thread; no agent message addressed to the user before review approval | `messages` where `author_kind='agent'` and mentions user and created before task done = 0 (except the approval request) |
 | P8 | Wall clock ≤ 60 s with fake binary; ≤ 15 min, ≤ $3.00 est., zero unexpected `permission_denials` with real binary | timers, `jobs.cost_usd`, `jobs.permission_denials` |
