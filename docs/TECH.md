@@ -36,12 +36,12 @@ Decisions:
 | `POST /api/messages` | user message; enqueue wake jobs (§5.1) |
 | `POST /api/tasks` | user-created task (`todo`, no approval) |
 | `POST /api/tasks/:id` `{action: cancel\|reopen\|unblock\|accept\|move, note?}` | user transitions (§3.1, actor=user) |
-| `POST /api/tasks/unblock-killed` | "Retry all" after kill: T16 for every `blocked/killed` task, one txn (each task goes to `in_review` or `todo` by the T16 resume rule) |
+| `POST /api/tasks/unblock-killed` | "Retry all" after kill: T16 for every `blocked/killed` task, one txn (each task goes to `in_review` or `todo` by `resumeTarget`, §3.1 round terms) |
 | `POST /api/jobs/:id` `{action: cancel\|retry_now}` | `cancel`: queued → J4 directly; running → set `cancel_requested = 1` + `/control/cancel` (orchestrator applies J17). `retry_now`: queued job with `attempts > 0` → `run_after = now` (no state change; else `409 not_retrying`) |
 | `POST /api/pause` `{action: resume\|hold}` | `resume`: `paused_until = NULL, pause_reason = NULL`; `hold`: `paused_until = NULL, pause_reason = 'user'` (no expiry, until `resume`). Event `settings.changed {pause}` |
 | `GET /api/jobs/:id/log` | read-only: last 200 transcript lines from `stdout.jsonl`, `failure_kind`, `error`, `exit_code` |
 | `POST /api/approvals/:id/decide` `{decision, note}` | the only writer of approval decisions |
-| `POST /api/threads/:id` `{action: close\|reopen\|raise_cap}` | thread lifecycle (§3.3); `reopen`/`raise_cap` apply the thread resume rule and return `{resumed: {task_id, kind} \| null}` |
+| `POST /api/threads/:id` `{action: close\|reopen\|raise_cap}` | thread lifecycle (§3.3); `reopen`/`raise_cap` apply the thread resume rule and return `{status, resumed: {task_id, kind} \| null}` (`status` = the thread's new status; reopen of a thread at its cap returns `status: 'capped', resumed: null`; UX.md §5 toasts) |
 | `POST /api/kill`, `POST /api/resume` | kill switch (§5.9) |
 | `PUT /api/budgets` `{day_usd, day_jobs, jobs_5h, max_concurrency}` | budget/cap edits (user only; Settings, UX.md §12); event `settings.changed {old, new}` |
 | `PUT /api/agents/:id` `{enabled}` | enable/disable an agent (Settings) |
@@ -160,6 +160,7 @@ CREATE TABLE tasks (
   claimed_by          TEXT REFERENCES agents(id),
   claim_expires_at    INTEGER,
   review_round        INTEGER NOT NULL DEFAULT 0 CHECK (review_round BETWEEN 0 AND 2),
+  review_cycle        INTEGER NOT NULL DEFAULT 0 CHECK (review_cycle >= 0),  -- += 1 on every round reset (T16 review_cap, T18); §3.1 round terms
   blocked_reason      TEXT CHECK (blocked_reason IS NULL OR blocked_reason IN
                         ('help','review_cap','job_failed','killed','agent_blocked','user')),
   base_commit         TEXT,                          -- set when workspace is initialised
@@ -243,6 +244,7 @@ CREATE INDEX notes_task ON notes(task_id, id);
 CREATE TABLE artifacts (
   id            INTEGER PRIMARY KEY,
   task_id       INTEGER NOT NULL REFERENCES tasks(id),
+  review_cycle  INTEGER NOT NULL CHECK (review_cycle >= 0),   -- tasks.review_cycle at capture
   review_round  INTEGER NOT NULL CHECK (review_round BETWEEN 1 AND 2),
   base_commit   TEXT NOT NULL,
   head_commit   TEXT NOT NULL,
@@ -250,13 +252,16 @@ CREATE TABLE artifacts (
   files         TEXT NOT NULL CHECK (json_valid(files)),
   lines_added   INTEGER NOT NULL CHECK (lines_added >= 0),
   lines_removed INTEGER NOT NULL CHECK (lines_removed >= 0),
-  verdict       TEXT CHECK (verdict IS NULL OR verdict IN ('approved','changes_requested')),
-  verdict_by    TEXT REFERENCES agents(id),
+  verdict       TEXT CHECK (verdict IS NULL OR verdict IN ('approved','changes_requested','superseded')),
+  verdict_by    TEXT REFERENCES agents(id),              -- director; NULL for 'superseded' (system, T16 redo)
   verdict_note  TEXT,
   created_at    INTEGER NOT NULL,
-  CHECK ((verdict IS NULL) = (verdict_by IS NULL))
+  CHECK ((verdict IS NOT NULL AND verdict <> 'superseded') = (verdict_by IS NOT NULL))
 ) STRICT;
 CREATE INDEX artifacts_task ON artifacts(task_id, id);
+-- At most one live artifact per round; superseded rows (redone rounds, T16) may repeat.
+CREATE UNIQUE INDEX artifacts_round ON artifacts(task_id, review_cycle, review_round)
+  WHERE verdict IS NULL OR verdict <> 'superseded';
 
 -- ───────────────────────── jobs ─────────────────────────
 CREATE TABLE jobs (
@@ -474,29 +479,39 @@ Guards are enforced in `lib/domain` inside one `BEGIN IMMEDIATE` transaction; th
 | T5 | proposed | approval rejected / expired | cancelled | — | system message; director not woken |
 | T6 | todo | claim (orchestrator, `work` job) | in_progress | job.agent = assignee; claim free or expired | `claimed_by`, `claim_expires_at = now+60s` |
 | T7 | in_progress | heartbeat | in_progress | claimed_by = job.agent | extend claim |
-| T8 | in_progress | `update_task submit_for_review` (worker) | in_review | caller = claimant; `review_round < 2`; workspace has changes vs last head | capture artifact (§5.11); `review_round += 1`; clear claim; enqueue director `review` |
+| T8 | in_progress | `update_task submit_for_review` (worker) | in_review | caller = claimant; `review_round < 2`; workspace has changes vs last head | `review_round += 1`; capture artifact (§5.11) with the task's (`review_cycle`, new `review_round`); clear claim; enqueue director `review` |
 | T9 | in_progress | job attempt failed, retryable / claim expired | todo | attempts < max | clear claim; job requeued with backoff |
 | T10 | in_progress, in_review | job failed terminally / `no_handoff` twice / `review` job failed `workspace_drift` (§5.11) | blocked (`job_failed`) | — | clear claim; Needs-you failure |
 | T11 | in_progress | worker job ends after a `request_help` in that job | blocked (`help`) | — | clear claim; help message already posted at call time; director `help` job enqueued **here**, in the same `finishAttempt` txn (never at call time, so the director cannot answer while the work job still runs) |
 | T12 | in_progress, todo | `update_task block` (assignee) | blocked (`agent_blocked`) | note required | clear claim; Needs-you failure |
-| T13 | in_review | `update_task approve` (director, `review` job for this task) | done | caller ≠ author of the round (worker); artifact for current round exists; workspace `git status --porcelain` empty **and** `rev-parse HEAD` = that artifact's `head_commit` (else `rejected: workspace_drift`, review job fails → T10) | artifact verdict; director's user-facing summary allowed; Needs-you `ready` (top-level only); if all subtasks of parent done, post to parent thread |
+| T13 | in_review | `update_task approve` (director, `review` job for this task) | done | caller ≠ author of the round (worker); current-round artifact (round terms below) exists with `verdict IS NULL`; workspace `git status --porcelain` empty **and** `rev-parse HEAD` = that artifact's `head_commit` (else `rejected: workspace_drift`, review job fails → T10) | artifact verdict; director's user-facing summary allowed; Needs-you `ready` (top-level only); if all subtasks of parent done, post to parent thread |
 | T14 | in_review | `update_task request_changes` (director) | todo | note required; `review_round < 2` | artifact verdict; feedback as `review` message + note; enqueue `work` |
 | T15 | in_review | `request_changes` (director) | blocked (`review_cap`) | `review_round = 2` | Needs-you `review_cap` "Review limit reached" (user: Send back with note = T16, or Cancel = T17; no accept-anyway, PRD §6) |
-| T16 | blocked | unblock or user reply in the task thread (user); director `post_message` with `wake` to worker on a `help`-blocked task; "Retry all" after kill (user, every `blocked/killed` task in one txn) | in_review **or** todo (resume rule) | director only for reason `help`; note required for reason `review_cap`. **Resume rule** (evaluated before any reset): if an artifact for the current `review_round` exists with `verdict IS NULL` **and** the workspace is clean with `HEAD` = its `head_commit` → `in_review` + enqueue director `review`; otherwise → `todo` + enqueue `work` | `review_round = 0` if reason `review_cap` (its round-2 artifact has a verdict, so always → todo) |
+| T16 | blocked | unblock or user reply in the task thread (user); director `post_message` with `wake` to worker on a `help`-blocked task; "Retry all" after kill (user, every `blocked/killed` task in one txn) | in_review **or** todo (`resumeTarget`, round terms below) | director only for reason `help`; note required for reason `review_cap` | apply `resumeTarget(task)`: its status, its job enqueued, and on `redo` the current-round artifact → `verdict = 'superseded'` and `review_round -= 1`; reason `review_cap` → `review_round = 0`, `review_cycle += 1` |
 | T17 | any non-terminal | cancel (user; director for tasks it created) | cancelled | — | clear claim; cancel queued jobs (J4); set `cancel_requested = 1` on its running job (orchestrator kills it → J16); thread → closed |
-| T18 | done | reopen with note (user) | todo | — | `accepted_at = NULL`, `review_round = 0`; note; if the thread is `closed`, reopen it in the same txn (`status = 'open'`, or `'capped'` if a count is at its cap; `closed_at = NULL`); enqueue `work` |
+| T18 | done | reopen with note (user) | todo | — | `accepted_at = NULL`, `review_round = 0`, `review_cycle += 1`; note; if the thread is `closed`, reopen it in the same txn (`status = 'open'`, or `'capped'` if a count is at its cap; `closed_at = NULL`); enqueue `work` |
 | T19 | done | accept (user) | done | top-level | `accepted_at = now`; close thread |
-| T20 | in_progress, in_review | kill switch kills the task's running `work`/`review` job (J15) | blocked (`killed`) | — | clear claim. Retry (T16) returns an `in_review` task to `in_review` + `review` by the resume rule |
-| T21 | in_progress, in_review | orchestrator finishes the task's running `work`/`review` job as J17 (user "Cancel job") | blocked (`user`) | — | clear claim; no Needs-you item (user acted); Retry (T16) follows the resume rule |
+| T20 | in_progress, in_review | kill switch kills the task's running `work`/`review` job (J15) | blocked (`killed`) | — | clear claim. Retry (T16) follows `resumeTarget` (an `in_review` task with a clean workspace returns to `in_review` + `review`) |
+| T21 | in_progress, in_review | orchestrator finishes the task's running `work`/`review` job as J17 (user "Cancel job") | blocked (`user`) | — | clear claim; no Needs-you item (user acted); Retry (T16) follows `resumeTarget` |
 
 User-allowed moves on the board: T16, T17, T18, T19 only. Users cannot move `in_review → done` (review cannot be skipped); they can Reopen after Done.
+
+**Round terms** (defined once in `lib/domain/rounds.ts`; every reference in this doc and UX.md means these):
+- `review_round` (0–2): rounds submitted in the current cycle; T8 `+= 1`, T16 redo `-= 1`.
+- `review_cycle`: `+= 1` on every round reset (T16 reason `review_cap`, T18), together with `review_round = 0`. Artifacts are stamped with both at capture (T8).
+- **Current-round artifact** `currentArtifact(task)`: the `artifacts` row with (`task_id`, `review_cycle`, `review_round`) = the task's and `verdict` ≠ `'superseded'`; none when `review_round = 0`. Unique by index `artifacts_round`. Used by T13, T14/T15 (verdict), `resumeTarget`, J2, J18, §5.11, `approve` (§8).
+- **`resumeTarget(task)`** → `{status, agent, kind, redo}`, evaluated on the task row as it is (before any reset); called by T16 and by `wakePreview` (§5.1), so the hint and the transition agree:
+  1. reason `review_cap` → `{todo, assignee, work, redo: false}` (its round-2 artifact has a verdict; T16 then resets the round).
+  2. `currentArtifact` exists with `verdict IS NULL` **and** `git status --porcelain` is empty **and** `HEAD` = its `head_commit` → `{in_review, director, review, redo: false}`.
+  3. `currentArtifact` exists with `verdict IS NULL` otherwise (workspace changed) → `{todo, assignee, work, redo: true}`: the round is redone, so T8's `review_round < 2` holds again and the worker can resubmit.
+  4. otherwise → `{todo, assignee, work, redo: false}`.
 
 ### 3.2 Job
 
 | # | From | Event | To | Guard | Side effects |
 |---|---|---|---|---|---|
 | J1 | — | trigger (§5.1) | queued | no queued job for (agent, thread, kind) else coalesce | `trigger_count += 1` on coalesce; `job.enqueued` |
-| J2 | queued | claim | running | kill off; not paused (both inside the claim txn, §5.3); budget gate (§5.5); running < `max_concurrency`; agent has no running job; agent enabled; thread `agent_job_count < max_agent_jobs`; for `work`: task claimable (T6); for `review`: workspace clean and `HEAD` = current-round `artifacts.head_commit` (checked before spawn, else J18) | lease 60 s; `attempts += 1`; token issued; `budget_reserved_usd = budget_cap_usd`; `thread.agent_job_count += 1`; spawn |
+| J2 | queued | claim | running | kill off; not paused (both inside the claim txn, §5.3); budget gate (§5.5); running < `max_concurrency`; agent has no running job; agent enabled; thread `agent_job_count < max_agent_jobs`; for `work`: task claimable (T6); for `review`: workspace clean and `HEAD` = `currentArtifact(task).head_commit` (§3.1 round terms; checked before spawn, else J18) | lease 60 s; `attempts += 1`; token issued; `budget_reserved_usd = budget_cap_usd`; `thread.agent_job_count += 1`; spawn |
 | J3 | queued | thread job cap reached | cancelled (`thread_capped`) | — | thread → `capped` |
 | J4 | queued | task cancelled/done, kill-cancel, or user "Cancel job" | cancelled | — | — |
 | J5 | running | `result.subtype = success`, exit 0, handoff ok | succeeded | for `work`: task status no longer `in_progress` after the job (T8/T11/T12 happened); for `review`: verdict given | record cost/turns; release reservation |
@@ -506,13 +521,13 @@ User-allowed moves on the board: T16, T17, T18, T19 only. Users cannot move `in_
 | J9 | running | `error_max_turns` | failed (`max_turns`) | `continuations = 1` | T10 |
 | J10 | running | `error_max_budget_usd` | failed (`max_budget`) | — | no retry; T10 |
 | J11 | running | `error_during_execution`, exit ≠ 0 with no result, `no_result`, `timeout_*`, `lease_lost`, `orphaned` | queued | `attempts < max_attempts` | `run_after = now + backoff` (§5.6); T9 |
-| J12 | running | as J11 | failed | `attempts = max_attempts` | T10 (`work`/`review`); system message (`respond`/`help`) |
+| J12 | running | as J11 | failed | `attempts = max_attempts` | T10 (`work`/`review`); `respond`/`help` (no task): thread system message "<agent> failed 3 times: <reason>", presence `failed` until that agent's next `succeeded` job, no Needs-you item (UX.md §8) |
 | J13 | running | init shows Slackboard MCP not connected or tools missing | failed (`mcp_not_connected`/`tools_missing`) | — | no retry; agents disabled until `doctor` passes |
 | J14 | running | usage limit suspected (§5.6) | queued (`usage_limit`) | — | `attempts -= 1`; unless `pause_reason = 'user'`: `paused_until = now+30min, pause_reason = 'usage_limit'` |
 | J15 | running | kill switch | killed | — | SIGTERM → SIGKILL group; T20 for `work`/`review` |
 | J16 | running | child killed `killedFor='cancelled'` and its task is `cancelled` (T17) | cancelled | orchestrator only (`finishAttempt`) | — (task already cancelled) |
 | J17 | running | child killed `killedFor='cancelled'` because `cancel_requested = 1` (user "Cancel job", `POST /api/jobs/:id`), task not cancelled | cancelled | orchestrator only (`finishAttempt`) | T21 for `work`/`review` |
-| J18 | running / claimed `review` | workspace dirty or `HEAD` ≠ current-round `head_commit` (pre-spawn check, or `approve` rejected `workspace_drift`) | failed (`workspace_drift`) | — | no retry; T10 |
+| J18 | running / claimed `review` | workspace dirty or `HEAD` ≠ `currentArtifact(task).head_commit` (pre-spawn check, or `approve` rejected `workspace_drift`) | failed (`workspace_drift`) | — | no retry; T10 |
 
 `finishAttempt` order: if the `work` job called `request_help` (in `tool_calls`), apply T11 first and classify J5; only then test J6/J7. `finishAttempt` normalises any unknown `result.subtype` to `error_during_execution`. If the row has `cancel_requested = 1`, any requeue outcome (J6, J8, J11, J14) becomes J16/J17 instead. Signature `finishAttempt(job, outcome, expectedOwner = ME)`: every update it makes is guarded `WHERE id=:id AND status='running' AND lease_owner=:expectedOwner` (0 rows → another owner recovered it; do nothing). The child `close` handler uses the default `ME`; `recoverOrphans` (§5.7) and `sweep` (§5.4) pass the row's own `j.lease_owner`, so rows owned by a dead orchestrator are recovered.
 
@@ -525,7 +540,7 @@ All terminal transitions: revoke token (`run_token_hash = NULL`), clear lease, `
 | open | agent message count reaches `max_agent_msgs` (trigger) or job cap hit | capped | Needs-you `thread_capped`; further agent posts rejected `thread_not_open` |
 | capped | user "raise cap" | open | `max_agent_msgs += 10`, `max_agent_jobs += 4`, `cap_raises = 1` (only once); **thread resume rule** |
 | open, capped | user closes / task accepted / task cancelled | closed | queued jobs for the thread cancelled; later agent posts rejected and dropped. User close of a thread whose task is non-terminal is allowed; the card shows the waiting line (UX.md §5) |
-| closed | user reopens, or T18 | open (`capped` if `agent_msg_count >= max_agent_msgs` or `agent_job_count >= max_agent_jobs`) | `closed_at = NULL`; if → open: **thread resume rule** |
+| closed | user reopens, or T18 | open (`capped` if `agent_msg_count >= max_agent_msgs` or `agent_job_count >= max_agent_jobs`) | `closed_at = NULL`; if → open: **thread resume rule**; if → `capped`: nothing enqueued (`resumed: null`, §1.1) |
 
 **Thread resume rule** (`lib/domain/resumeThread`, same txn as the thread → `open`): if the thread's task is `todo` → enqueue `work` for the assignee; `in_review` → enqueue director `review`; any other status → nothing (`in_progress` is recovered by the claim sweep, T9; `blocked`/`proposed`/terminal have their own path). Enqueue coalesces (J1), so a job that survived (e.g. T18's own `work`) is not duplicated. This is the only way jobs cancelled by J3 or by close come back.
 
@@ -561,15 +576,15 @@ Before each spawn the orchestrator deletes `CLAUDE.md`, `CLAUDE.local.md`, `.mcp
 |---|---|---|
 | User message whose mentions include `director`, or any user message in `#general` root / non-task thread | `respond` for director | 80 |
 | User message in a task thread whose task is not `blocked` | `respond` for director (the user never wakes the worker directly in MVP) | 80 |
-| User message in a task thread whose task is `blocked` (answers a help item), or user Unblock (T16) | `work` for assignee (via T16); director not woken | 100 |
+| User message in a task thread whose task is `blocked` (answers a help item), or user Unblock (T16) | T16 → `resumeTarget(task)` (§3.1): `work` for assignee, or `review` for director; director not woken to respond | 100 / 50 |
 | Task enters `todo` with assignee (T1, T3, T4, T14, T16, T18) | `work` for assignee | 100 |
-| Task enters `in_review` (T8, T16 resume rule) | `review` for director | 50 |
+| Task enters `in_review` (T8, T16 via `resumeTarget`) | `review` for director | 50 |
 | Thread → `open` by reopen / raise cap / T18 (§3.3 thread resume rule) | `work` if task `todo`, `review` if `in_review` | 100 / 50 |
 | Worker `work` job that called `request_help` ends (T11, enqueued in `finishAttempt`) | `help` for director | 60 |
-| Director `post_message` with `wake: true` mentioning `worker` | task `blocked/help` → T16 → `work`; otherwise `respond` for worker, only if the thread's task is non-terminal and assigned to it | 90 |
+| Director `post_message` with `wake: true` mentioning `worker` | task `blocked/help` → T16 → `resumeTarget(task)` (always `work`: a help-blocked task has no unverdicted artifact); otherwise `respond` for worker, only if the thread's task is non-terminal and assigned to it | 90 |
 | Anything else: agent messages without `wake`, worker messages, system messages, approvals of `send/spend/...` | none | — |
 
-These rules live once in `lib/domain/wakePreview(thread, mentions, author)` → `{agent, kind, unblocksTask?} | null` plus the thread's `agent_job_count/max_agent_jobs`; `POST /api/messages` enqueues from it and the UI composer hint (UX.md §6) renders it, so the hint cannot disagree with what runs. A capped or closed thread returns `null` (no claim can happen there).
+These rules live once in `lib/domain/wakePreview(thread, mentions, author)` → `{agent, kind, unblocksTask?} | null` (for a T16 row it returns `resumeTarget(task)`'s agent and kind, the same call T16 makes) plus the thread's `agent_job_count/max_agent_jobs`; `POST /api/messages` enqueues from it and the UI composer hint (UX.md §6) renders it, so the hint cannot disagree with what runs. A capped or closed thread returns `null` (no claim can happen there).
 
 Workers can never wake the director by chatting (only via `request_help` or `submit_for_review`), and nobody wakes on acknowledgments: this removes the acknowledgment-loop class (research.md §3).
 
@@ -740,7 +755,7 @@ The LLM chief of staff (§9.3) is Phase 2.
 
 1. UI `POST /api/kill` → txn `system_state.kill_switch = 1, kill_engaged_at = now`, event `kill.engaged`; then best-effort `POST /control/kill` to the orchestrator (the 1 s tick catches it otherwise).
 2. Orchestrator `killAll('kill')`: revoke every run token first (tool calls fail immediately), SIGTERM each process group, SIGKILL after 3 s, then at 5 s `sweepByMarker('--sb-job=')` and a `ps` scan for any `claude` whose argv contains a known session id → SIGKILL. Survivors (pid list) go in a `kill.engaged` follow-up event and the UI banner.
-3. Jobs → `killed` (J15); their `work`/`review` tasks (`in_progress` or `in_review`) → `blocked/killed` (T20); "Retry all" (T16) sends each back to `in_review` + `review` or `todo` + `work` by the resume rule. Queued jobs stay queued and are not claimed until resume.
+3. Jobs → `killed` (J15); their `work`/`review` tasks (`in_progress` or `in_review`) → `blocked/killed` (T20); "Retry all" (T16) sends each back to `in_review` + `review` or `todo` + `work` by `resumeTarget` (§3.1 round terms). Queued jobs stay queued and are not claimed until resume.
 4. Process-group assumption: `spawn(..., {detached: true})` makes `claude` a group leader; that `claude` keeps its MCP children in its group is **UNVERIFIED**. Fallback is the argv-marker sweep in step 2, which the e2e test S3 asserts.
 5. Resume: `POST /api/resume` (confirm) → `kill_switch = 0`, event `kill.released`.
 
@@ -752,9 +767,9 @@ The LLM chief of staff (§9.3) is Phase 2.
 
 ### 5.11 Artifact capture (review material the worker cannot fake)
 
-On `submit_for_review`: `git add -A && git commit --allow-empty -m "T-<id> round <n>"` (with `GIT_DIR` outside the tree, hooks disabled), `git diff --stat --numstat <base_commit> HEAD` and the full unified diff → `runs/<job>/review.diff` and an `artifacts` row. The review job's prompt embeds this diff (≤ 16 KB, then truncated with a marker and the file list); the director can `Read` full files in the workspace.
+On `submit_for_review`: `git add -A && git commit --allow-empty -m "T-<id> round <n>"` (with `GIT_DIR` outside the tree, hooks disabled), `git diff --stat --numstat <base_commit> HEAD` and the full unified diff → `runs/<job>/review.diff` and an `artifacts` row stamped with the task's (`review_cycle`, `review_round`) after T8's increment; it becomes the current-round artifact (§3.1 round terms). The review job's prompt embeds this diff (≤ 16 KB, then truncated with a marker and the file list); the director can `Read` full files in the workspace.
 
-**Delivered = reviewed.** Only worker `work` jobs can write the workspace (§6.1: worker `respond` is read-only and runs in `agents/worker/`; one running job per agent). Before spawning a `review` job and again inside T13, the orchestrator checks `git status --porcelain` is empty and `git rev-parse HEAD` equals the current round's `artifacts.head_commit`; any mismatch fails the review with `workspace_drift` (J18 → T10), so Done always means the delivered files are exactly the reviewed diff.
+**Delivered = reviewed.** Only worker `work` jobs can write the workspace (§6.1: worker `respond` is read-only and runs in `agents/worker/`; one running job per agent). Before spawning a `review` job and again inside T13, the orchestrator checks `git status --porcelain` is empty and `git rev-parse HEAD` equals `currentArtifact(task).head_commit`; any mismatch fails the review with `workspace_drift` (J18 → T10), so Done always means the delivered files are exactly the reviewed diff.
 
 ## 6. `claude -p` invocation
 
@@ -910,7 +925,7 @@ Side effects: thread `T-<id> <title>` in `#general`; task. `parent_id = null` �
 | Action | Who | Guard | Transition |
 |---|---|---|---|
 | `submit_for_review` | worker, claimant, `work` job for this task | workspace changed vs last head | T8 |
-| `approve` | director, `review` job for this task | artifact for current round; workspace clean and `HEAD` = its `head_commit` (else `workspace_drift`, J18) | T13 |
+| `approve` | director, `review` job for this task | `currentArtifact(task)` (§3.1 round terms) with `verdict IS NULL`; workspace clean and `HEAD` = its `head_commit` (else `workspace_drift`, J18) | T13 |
 | `request_changes` | director, `review` job | `note` required | T14 / T15 |
 | `block` | assignee | `note` required | T12 |
 | `cancel` | director, task it created, not done | — | T17 |
@@ -1081,9 +1096,9 @@ Rules
 ## 11. Test plan
 
 **Unit (vitest, in-memory SQLite with the real DDL):**
-- DDL: every CHECK rejects a bad value; triggers: events update/delete abort; agent top-level task insert as `todo` aborts; `proposed → todo` without approval aborts and with approval succeeds; every pair not in §3.1 aborts; approval illegal transitions and immutable fields abort; `jobs_one_running_per_agent` rejects a second running job; updating title/description/acceptance/assignee of an agent-created top-level task aborts `approved_task_immutable` (proposed and after approval), while a subtask edit succeeds; `blocked → in_review` succeeds; `system_state` rejects `pause_reason='user'` with `paused_until` set and `'usage_limit'` without it; `jobs.cancel_requested = 2` aborts.
+- DDL: every CHECK rejects a bad value; triggers: events update/delete abort; agent top-level task insert as `todo` aborts; `proposed → todo` without approval aborts and with approval succeeds; every pair not in §3.1 aborts; approval illegal transitions and immutable fields abort; `jobs_one_running_per_agent` rejects a second running job; updating title/description/acceptance/assignee of an agent-created top-level task aborts `approved_task_immutable` (proposed and after approval), while a subtask edit succeeds; `blocked → in_review` succeeds; `system_state` rejects `pause_reason='user'` with `paused_until` set and `'usage_limit'` without it; `jobs.cancel_requested = 2` aborts; a second live artifact for the same (`task_id`, `review_cycle`, `review_round`) aborts on `artifacts_round` while a `superseded` duplicate succeeds; `verdict = 'superseded'` with `verdict_by` set, or `'approved'` without it, aborts.
 - Migration: `openDb()` leaves `journal_mode = wal` and `foreign_keys = 1` on the connection after `migrate()`.
-- Task state machine: table-driven test over all rows T1–T21 (from, event, actor, guard true/false) → expected status, side-effect rows (jobs enqueued, events, approvals). Includes: T4 with a task row whose hash ≠ `payload_hash` → rejected; T13 with a file changed after capture (dirty tree, or HEAD ≠ `head_commit`) → `workspace_drift`, task `blocked/job_failed`, never `done`. T16 resume rule: task killed (T20) or job-cancelled (T21) while `in_review` with an unverdicted current-round artifact and clean workspace → Retry / "Retry all" → `in_review` + director `review` queued (no `work`); same with a dirty workspace (`workspace_drift`) → `todo` + `work`; `in_progress` killed → `todo` + `work`; `review_cap` Send back → `todo`, `review_round = 0`. T18 on an accepted task (thread `closed`) → thread `open`, `closed_at` NULL, and the `work` job is claimable by §5.3. Thread resume rule: raise cap on a capped thread whose task is `todo` (job cancelled by J3) → `work` queued; reopen of a user-closed thread whose task is `in_review` → `review` queued; reopen with task `blocked` → nothing queued.
+- Task state machine: table-driven test over all rows T1–T21 (from, event, actor, guard true/false) → expected status, side-effect rows (jobs enqueued, events, approvals). Includes: T4 with a task row whose hash ≠ `payload_hash` → rejected; T13 with a file changed after capture (dirty tree, or HEAD ≠ `head_commit`) → `workspace_drift`, task `blocked/job_failed`, never `done`. T16 / `resumeTarget` (each case also asserts `wakePreview` on that thread returns the same agent and kind): task killed (T20) or job-cancelled (T21) while `in_review` with an unverdicted current-round artifact and clean workspace → Retry / "Retry all" → `in_review` + director `review` queued (no `work`); same with a dirty workspace (`workspace_drift`) → `todo` + `work`, that artifact `superseded`, `review_round` 2 → 1, then the worker's `submit_for_review` passes T8 (round 2 again, new live artifact) and the review job's pre-spawn check passes; `in_progress` killed → `todo` + `work`; `review_cap` Send back → `todo`, `review_round = 0`, `review_cycle + 1`. Round reset: after `review_cap` Send back (or T18), the next T8 artifact is the current-round artifact (not the old cycle's row with the same `review_round`), so J2/T13 see no drift and a kill during that review followed by Retry → `in_review`. T18 on an accepted task (thread `closed`) → thread `open`, `closed_at` NULL, and the `work` job is claimable by §5.3. Thread resume rule: raise cap on a capped thread whose task is `todo` (job cancelled by J3) → `work` queued; reopen of a user-closed thread whose task is `in_review` → `review` queued; reopen with task `blocked` → nothing queued; reopen of a closed thread at its message cap with task `todo` → `{status: 'capped', resumed: null}`, nothing queued. J12 on a director `respond` job → thread system message, presence `failed`, no `needs_you` row; its next `succeeded` job → presence `idle`.
 - Job state machine: table-driven over J1–J18 with synthetic `{exitCode, result, killedFor, init}` → status, `failure_kind`, `run_after`, attempts, continuations, task effect. Includes: `work` success after `request_help` → J5 + T11 (`blocked/help`) and director `help` job enqueued in that same txn, not requeued; `request_help` call alone enqueues no job (no director `help` job exists while the `work` job runs); `work` success leaving `in_progress` with no `request_help` → J6; unknown `result.subtype` → treated as `error_during_execution`; child-close `finishAttempt` (default owner `ME`) on a row with a foreign `lease_owner` → no change; `recoverOrphans` on a `running` row owned by a different (dead) `lease_owner` → finished `orphaned` and requeued (J11); `cancel_requested = 1` on a running job → next `tick()` kills the child, `finishAttempt` → J17 + T21 (`blocked/user`), or J16 if the task is `cancelled`; an outcome that would requeue (J11) with `cancel_requested = 1` → cancelled; Next.js `POST /api/jobs/:id {cancel}` on a running job leaves it `running` (only the flag changes) and `jobs_one_running_per_agent` still holds until the orchestrator finishes it; `retry_now` sets `run_after = now` only for a queued job with `attempts > 0`; `POST /api/pause {hold}` → claim returns no row until `{resume}`, and J14 during hold leaves `pause_reason = 'user'`.
 - Requeue merge: retrying job R (attempts 2, session S) collides with fresh queued Q → Q `cancelled`, R `queued` with same id, attempts 2, session S, `trigger_count` = R + Q.
 - Sweep: a `running` job with expired lease, owned by this orchestrator but absent from `children` → `orphaned`, requeued; a live child with fresh lease is untouched.
