@@ -69,3 +69,56 @@ describe('F5 doctor token', () => {
     server.close();
   });
 });
+
+import { afterEach } from 'vitest';
+import { setDbForTests } from '@/lib/db';
+import { bootstrap } from '@/lib/server/read';
+afterEach(() => setDbForTests(null));
+
+describe('F6 crash-recovery badge', () => {
+  it('shows "Claim expired, requeued" for 10 s after an orphan requeue, then the failure badge', () => {
+    const db = freshEnv(); setDbForTests(db);
+    const { task_id } = userTask(db);
+    const w = claim(db)!;
+    tx(db, () => finishAttempt(db, w.id, { failure: 'orphaned' }, ME));
+    const b = () => bootstrap().tasks.find((t: any) => t.id === task_id)!.badge as any;
+    expect(b()).toEqual({ icon: '⟲', text: 'Claim expired, requeued' });
+    const real = Date.now; Date.now = () => real() + 20_000;            // events are append-only: move the clock instead
+    try { expect(b().text).toBe('Run failed (orchestrator restarted)'); } finally { Date.now = real; }
+  });
+});
+
+describe('F7 header data', () => {
+  it('exposes running_jobs and next_run_at (5 h window: oldest job.started + 5 h)', () => {
+    const db = freshEnv(); setDbForTests(db);
+    userTask(db);
+    expect(bootstrap().usage.next_run_at).toBeNull();
+    const w = claim(db)!;
+    expect(bootstrap().system.running_jobs).toBe(1);
+    const t0 = Date.now() - 3_600_000;
+    db.prepare(`INSERT INTO events(ts,type,actor,entity_type,entity_id,payload) VALUES (?,?,?,?,?,?)`).run(t0, 'job.started', 'system', 'job', String(w.id), '{}');
+    db.prepare(`UPDATE budgets SET limit_jobs=2 WHERE period='rolling_5h'`).run();
+    expect(bootstrap().usage.next_run_at).toBe(t0 + 18_000_000);
+  });
+});
+
+import tailwind from '../../tailwind.config';
+describe('F9 breakpoints (UX §2)', () => {
+  it('md = 800 px (one-pane below) and xl = 1200 px (right-pane overlay below)', () => {
+    expect((tailwind.theme as any).screens).toMatchObject({ md: '800px', xl: '1200px' });
+  });
+});
+
+import { dropMove } from '../../components/dnd';
+describe('F10 board drop rules (UX §5)', () => {
+  it('allows only user transitions', () => {
+    expect(dropMove('blocked', 'todo')).toEqual({ kind: 'unblock' });
+    expect(dropMove('blocked', 'in_review')).toEqual({ kind: 'unblock' });
+    expect(dropMove('done', 'todo')).toEqual({ kind: 'reopen' });
+    expect(dropMove('in_progress', 'cancelled')).toEqual({ kind: 'cancel' });
+    expect(dropMove('todo', 'todo')).toEqual({ kind: 'noop' });
+    expect(dropMove('in_review', 'done')).toEqual({ kind: 'reject', message: 'Only the reviewer can move In review → Done' });
+    for (const [f, t] of [['todo', 'in_progress'], ['done', 'in_review'], ['done', 'cancelled'], ['cancelled', 'todo'], ['proposed', 'todo'], ['todo', 'proposed'], ['blocked', 'done']])
+      expect(dropMove(f, t).kind).toBe('reject');
+  });
+});

@@ -89,7 +89,10 @@ export function bootstrap() {
     let badge: Badge | null = null;
     if (lastJob?.status === 'queued' && lastJob.attempts > 0 && lastJob.failure_kind) {
       const fk = lastJob.failure_kind as string;
-      if (lastJob.continuations === 1 && (fk === 'no_handoff' || fk === 'max_turns')) {
+      if (fk === 'orphaned' && d.prepare(`SELECT 1 FROM events WHERE type='job.requeued' AND entity_type='job' AND entity_id=(SELECT id FROM jobs WHERE task_id=? ORDER BY id DESC LIMIT 1)
+          AND json_extract(payload,'$.reason')='orphaned' AND ts>=?`).get(t.id, now() - 10_000)) {
+        badge = { icon: '⟲', text: 'Claim expired, requeued' };                          // UX §5: 10 s after crash recovery
+      } else if (lastJob.continuations === 1 && (fk === 'no_handoff' || fk === 'max_turns')) {
         badge = { icon: '⟲', text: `Continuing (${fk === 'max_turns' ? 'turn limit' : 'no handoff'})` };
       } else {
         const why = fk === 'exit_nonzero' ? `exit ${lastJob.exit_code}` : FAIL_TEXT[fk] ?? fk;
@@ -114,16 +117,24 @@ export function bootstrap() {
     FROM threads th ORDER BY th.created_at DESC LIMIT 200`).all();
   const runningKilledPending = s.kill_switch && orchestratorStatus(s) === 'down'
     ? (d.prepare(`SELECT count(*) n FROM jobs WHERE status='running'`).get() as any).n : 0;
+  const running_jobs = (d.prepare(`SELECT count(*) n FROM jobs WHERE status='running'`).get() as any).n as number;
+  // Next run allowed when a job cap blocks (UX §9): 5 h window = oldest job.started in the window + 5 h; day cap = next local midnight.
+  let next_run_at: number | null = null;
+  if (b.jobs5h >= b.limitJobs5h) {
+    const o = d.prepare(`SELECT min(ts) m FROM events WHERE type='job.started' AND ts >= ?`).get(now() - 18_000_000) as { m: number | null };
+    if (o.m) next_run_at = o.m + 18_000_000;
+  }
+  if (b.jobsDay >= b.limitJobsDay) next_run_at = Math.max(next_run_at ?? 0, localMidnight() + 86_400_000);
   return {
     now: now(),
     lastEventId: (d.prepare(`SELECT ifnull(max(id),0) m FROM events`).get() as any).m,
     system: { kill_switch: !!s.kill_switch, kill_engaged_at: s.kill_engaged_at, paused_until: s.paused_until, pause_reason: s.pause_reason,
       orchestrator: orchestratorStatus(s), heartbeat_at: s.orchestrator_heartbeat_at, doctor_ok_at: s.doctor_ok_at,
       doctor_report: s.doctor_report ? JSON.parse(s.doctor_report) : null, claude_version: s.claude_version, max_concurrency: s.max_concurrency,
-      blocked_by: g.blocked_by, kill_followup: lastKill ? JSON.parse(lastKill.payload) : null, kill_pending_runs: runningKilledPending,
+      blocked_by: g.blocked_by, kill_followup: lastKill ? JSON.parse(lastKill.payload) : null, kill_pending_runs: runningKilledPending, running_jobs,
       api_key_detected: !!process.env.ANTHROPIC_API_KEY },
     usage: { spent_day: b.spent, jobs_day: b.jobsDay, jobs_5h: b.jobs5h, limit_usd_day: b.limitUsdDay, limit_jobs_day: b.limitJobsDay,
-      limit_jobs_5h: b.limitJobs5h, reset_at: localMidnight() + 86_400_000 },
+      limit_jobs_5h: b.limitJobs5h, reset_at: localMidnight() + 86_400_000, next_run_at },
     agents: d.prepare(`SELECT a.*, (SELECT count(*) FROM jobs WHERE agent_id=a.id AND status='queued') AS queued,
       (SELECT started_at FROM jobs WHERE agent_id=a.id AND status='running') AS running_since,
       (SELECT task_id FROM jobs WHERE agent_id=a.id AND status='running') AS running_task,

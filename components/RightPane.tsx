@@ -76,10 +76,10 @@ function ThreadPane({ id }: { id: number }) {
         {th.status !== 'closed' && <ActionButton label="Close thread" run={() => threadAct('close')} />}
         {sys > 0 && <button className="text-xs underline ml-auto" onClick={() => setShowSys((s) => !s)}>{showSys ? 'Hide' : 'Show'} {sys} system events</button>}
       </div>
-      <ol className="p-3 space-y-3" aria-live="polite">
+      <ol className="p-3 space-y-3" aria-live="polite" data-nav-list="messages">
         {data.messages.map((m: any) => m.author_kind === 'system'
-          ? (showSys && <li key={m.id} className="text-xs text-slate-400"><span aria-hidden>▸</span> system · <Time t={m.created_at} now={boot.now} /> {m.body}</li>)
-          : <li key={m.id} className={m.kind === 'help' ? 'border-l-2 border-amber-400 pl-2' : ''}>
+          ? (showSys && <li key={m.id} tabIndex={0} className="text-xs text-slate-400 focus:outline focus:outline-2 focus:outline-sky-400"><span aria-hidden>▸</span> system · <Time t={m.created_at} now={boot.now} /> {m.body}</li>)
+          : <li key={m.id} tabIndex={0} className={`focus:outline focus:outline-2 focus:outline-sky-400 ${m.kind === 'help' ? 'border-l-2 border-amber-400 pl-2' : ''}`}>
               <div className="text-xs text-slate-400"><span className="font-semibold text-slate-200">{roleChip(m)}</span>{m.kind !== 'chat' ? ` (${m.kind})` : ''} · <Time t={m.created_at} now={boot.now} /></div>
               <div className="text-sm whitespace-pre-wrap">{m.body}</div>
             </li>)}

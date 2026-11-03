@@ -18,7 +18,7 @@ function copy(text: string, toast: (t: string) => void) {
 }
 
 export function KillDialog({ onClose }: { onClose: () => void }) {
-  const { toast, refresh } = useStore();
+  const { toast, refresh, set } = useStore();
   const [result, setResult] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
   return (
@@ -29,9 +29,10 @@ export function KillDialog({ onClose }: { onClose: () => void }) {
       {result && <p className="text-sm mb-3" aria-live="polite">{result}</p>}
       <div className="flex gap-2 justify-end">
         <button type="button" className="btn bg-slate-700" onClick={onClose}>Cancel</button>
-        <ActionButton label="Stop all" pending="Stopping…" kind="danger" autoFocus onError={(e) => { setErr(e.hint || e.code); return true; }}
+        <ActionButton label="Stop all" pending="Stopping…" kind="danger" autoFocus onError={(e) => { setErr(e.hint || e.code); set({ killFailed: true }); return true; }}
           run={async () => {
             const r = await api('/api/kill', { body: {} });
+            set({ killFailed: false });
             await refresh();
             if (r.path === 'direct') {
               const n = (r.survivors ?? []).length;
@@ -64,7 +65,7 @@ function Banner({ tone, icon, children }: { tone: 'red' | 'amber'; icon: string;
 }
 
 export function Header() {
-  const { boot, sse, sessionExpired, setView, set, toast, refresh } = useStore();
+  const { boot, sse, sessionExpired, setView, set, toast, refresh, killFailed } = useStore();
   const [kill, setKill] = useState(false);
   const [resume, setResume] = useState(false);
   const [dismissKey, setDismissKey] = useState(false);
@@ -81,7 +82,7 @@ export function Header() {
   const lk = s.kill_followup;
   const killStatus = s.kill_switch
     ? (s.kill_pending_runs > 0 ? `${s.kill_pending_runs} run${s.kill_pending_runs > 1 ? 's' : ''} not yet marked stopped`
-      : !lk ? 'Stopping…'
+      : !lk ? (orch === 'down' || !(s.running_jobs > 0) ? 'Stopping…' : `Stopping ${s.running_jobs} process${s.running_jobs > 1 ? 'es' : ''}…`)
       : lk.survivors?.length ? `${lk.survivors.length} processes may still be running (pid ${lk.survivors.join(', ')})` : 'Stopped')
     : null;
   const doctorFailed = s.doctor_report && !s.doctor_report.ok;
@@ -96,6 +97,7 @@ export function Header() {
           <span aria-hidden>{orchIcon}</span> orchestrator: {orch}</span>
         <span className="text-slate-400" aria-live="polite">{sse === 'live' ? '' : sse === 'reconnecting' ? '⟲ Live updates paused, reconnecting…' : ''}</span>
         {sse === 'offline' && <button className="text-amber-300 underline" onClick={() => location.reload()}>Offline. Retry</button>}
+        {killFailed && !s.kill_switch && <span role="status" className="text-rose-300 font-semibold"><span aria-hidden>✕</span> Kill failed</span>}
         <span className="flex-1" />
         <button type="button" className="btn bg-slate-700" onClick={() => setView('settings')} aria-label="Settings (g s)"><span aria-hidden>⚙</span> Settings</button>
         {s.kill_switch
@@ -118,8 +120,8 @@ export function Header() {
         <ActionButton label="Resume now" run={async () => { await api('/api/pause', { body: { action: 'resume' } }); await refresh(); }} /></Banner>}
       {!dismissBudget && (s.blocked_by === 'budget' || s.blocked_by === 'job_cap') && <Banner tone="amber" icon="⊘">
         {s.blocked_by === 'budget' ? `Daily budget reached (${usd(u.limit_usd_day)} est.). New agent runs are paused until 00:00 or you raise the budget. Running jobs finish.`
-          : `Job cap reached (${u.jobs_day >= u.limit_jobs_day ? u.limit_jobs_day + ' per day' : u.limit_jobs_5h + ' per 5 h'}).`}
-        <button className="underline" onClick={() => { set({ settingsFocus: s.blocked_by === 'budget' ? 'day_usd' : 'jobs_5h' }); setView('settings'); }}>
+          : `Job cap reached (${u.jobs_day >= u.limit_jobs_day ? u.limit_jobs_day + ' per day' : u.limit_jobs_5h + ' per 5 h'}).${u.next_run_at ? ` Next run allowed at ${hhmm(u.next_run_at)}.` : ''}`}
+        <button className="underline" onClick={() => { set({ settingsFocus: s.blocked_by === 'budget' ? 'day_usd' : u.jobs_day >= u.limit_jobs_day ? 'day_jobs' : 'jobs_5h' }); setView('settings'); }}>
           {s.blocked_by === 'budget' ? 'Raise budget' : 'Raise cap'}</button>
         <button className="underline" onClick={() => setDismissBudget(true)}>Dismiss</button></Banner>}
       {s.api_key_detected && !dismissKey && <Banner tone="amber" icon="⚠">ANTHROPIC_API_KEY is set in your environment. Agents run without it, on your subscription.

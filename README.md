@@ -94,4 +94,4 @@ See TECH.md §12:
 - dynamic worker spawning, agent-to-agent help, and a side-by-side diff view
 - the LLM chief of staff, executors for approved external actions, and more channels
 
-UI items deferred from UX.md: the `⌘K` quick switcher, drag-and-drop on the board (use the **Move…** menu or the `m` key; the spec already requires it as the accessible equivalent), and `j`/`k`/`h`/`l` list navigation.
+Keyboard and board extras: `Ctrl/⌘+K` quick switcher, `j`/`k` (next/previous item in the focused list), `h`/`l` (board columns), and drag-and-drop of cards onto columns for legal user moves only (the **Move…** menu and the `m` key remain the accessible equivalent). Press `?` for the full list.

@@ -5,6 +5,10 @@ import { api } from './api';
 import { Composer } from './Composer';
 import { ActionButton, Dialog, NoteDialog, Presence, TaskStatus, Time, usd } from './ui';
 import { retryToast } from './NeedsYou';
+import { dropMove } from './dnd';
+
+/** Card drop handlers by task id; each TaskCard registers itself so the board can route a drop to the card's own dialogs. */
+const dropHandlers = new Map<number, (target: string) => void>();
 
 export function Chat() {
   const { boot, open } = useStore();
@@ -49,18 +53,29 @@ export function TaskCard({ t, now }: { t: any; now: number }) {
   const name = `T-${t.id}, ${t.title}, ${({ todo: 'To do', in_progress: 'In progress', in_review: 'In review' } as any)[t.status] ?? t.status}${t.round ? ', ' + t.round : ''}, assigned to ${t.assignee_agent_id}`;
   const post = async (action: string, note?: string) => { const r = await api(`/api/tasks/${t.id}`, { body: { action, note } }); await refresh(); return r; };
   const moves: [string, () => void][] = [];
-  if (t.status === 'blocked') moves.push([t.blocked_reason === 'review_cap' ? 'Send back with note' : 'Unblock (retry)', () =>
-    t.blocked_reason === 'review_cap'
-      ? setDlg(<NoteDialog title={`Send T-${t.id} back`} label="Note (required)" confirm="Send back" onClose={() => setDlg(null)} onDone={async (n) => toast(retryToast(await post('unblock', n), t.id))} />)
-      : post('unblock').then((r) => toast(retryToast(r, t.id)), (e) => toast(`Couldn't move T-${t.id}: ${e.hint || e.code}`, 'error'))]);
-  if (t.status === 'done' && !t.parent_id && !t.accepted_at) moves.push(['Accept', () => post('accept').then(() => toast(`T-${t.id} accepted`))]);
-  if (t.status === 'done') moves.push(['Reopen with note', () => setDlg(<NoteDialog title={`Reopen T-${t.id}`} label="What should change? (required)" confirm="Reopen" onClose={() => setDlg(null)} onDone={(n) => post('reopen', n)} />)]);
-  if (!['done', 'cancelled'].includes(t.status)) moves.push(['Cancel task', () => setDlg(<Dialog title={`Cancel T-${t.id}?`} onClose={() => setDlg(null)}>
+  const doUnblock = () => t.blocked_reason === 'review_cap'
+    ? setDlg(<NoteDialog title={`Send T-${t.id} back`} label="Note (required)" confirm="Send back" onClose={() => setDlg(null)} onDone={async (n) => toast(retryToast(await post('unblock', n), t.id))} />)
+    : post('unblock').then((r) => toast(retryToast(r, t.id)), (e) => toast(`Couldn't move T-${t.id}: ${e.hint || e.code}`, 'error'));
+  const doReopen = () => setDlg(<NoteDialog title={`Reopen T-${t.id}`} label="What should change? (required)" confirm="Reopen" onClose={() => setDlg(null)} onDone={(n) => post('reopen', n)} />);
+  const doCancel = () => setDlg(<Dialog title={`Cancel T-${t.id}?`} onClose={() => setDlg(null)}>
     <p className="text-sm mb-3">Queued runs are cancelled and a running agent is stopped.</p>
     <div className="flex justify-end gap-2"><button className="btn bg-slate-700" onClick={() => setDlg(null)}>Keep</button>
-      <ActionButton label="Cancel task" kind="danger" run={async () => { await post('cancel'); setDlg(null); toast(`T-${t.id} cancelled`); }} /></div></Dialog>)]);
+      <ActionButton label="Cancel task" kind="danger" run={async () => { await post('cancel'); setDlg(null); toast(`T-${t.id} cancelled`); }} /></div></Dialog>);
+  if (t.status === 'blocked') moves.push([t.blocked_reason === 'review_cap' ? 'Send back with note' : 'Unblock (retry)', doUnblock]);
+  if (t.status === 'done' && !t.parent_id && !t.accepted_at) moves.push(['Accept', () => post('accept').then(() => toast(`T-${t.id} accepted`))]);
+  if (t.status === 'done') moves.push(['Reopen with note', doReopen]);
+  if (!['done', 'cancelled'].includes(t.status)) moves.push(['Cancel task', doCancel]);
+  dropHandlers.set(t.id, (target) => {
+    const r = dropMove(t.status, target);
+    if (r.kind === 'reject') toast(r.message, 'error');
+    else if (r.kind === 'unblock') doUnblock();
+    else if (r.kind === 'reopen') doReopen();
+    else if (r.kind === 'cancel') doCancel();
+  });
+  useEffect(() => () => { dropHandlers.delete(t.id); }, [t.id]);
   return (
-    <li aria-label={name} data-task-card={t.id} tabIndex={0} className="bg-slate-800 border border-slate-700 rounded p-2 text-sm focus:outline focus:outline-2 focus:outline-sky-400 cursor-pointer"
+    <li aria-label={name} data-task-card={t.id} tabIndex={0} draggable onDragStart={(e) => { e.dataTransfer.setData('text/plain', String(t.id)); e.dataTransfer.effectAllowed = 'move'; }}
+      className="bg-slate-800 border border-slate-700 rounded p-2 text-sm focus:outline focus:outline-2 focus:outline-sky-400 cursor-pointer"
       onClick={() => open({ kind: 'task', id: t.id })}
       onKeyDown={(e) => { if (e.key === 'Enter') open({ kind: 'task', id: t.id }); if (e.key === 'm' && moves.length) { e.preventDefault(); setMenu(true); } }}>
       <div className="flex justify-between gap-2 text-xs"><span className="font-mono">T-{t.id}</span><TaskStatus s={t.status} />{t.round && <span className="text-slate-400">{t.round}</span>}</div>
@@ -86,6 +101,7 @@ export function Board({ now }: { now: number }) {
   const { boot, open } = useStore();
   const [showCancelled, setShowCancelled] = useState(false);
   const [allDone, setAllDone] = useState(false);
+  const [over, setOver] = useState<string | null>(null);
   if (!boot) return null;
   const cols = showCancelled ? [...COLUMNS, ['cancelled', 'Cancelled'] as [string, string]] : COLUMNS;
   return (
@@ -101,9 +117,12 @@ export function Board({ now }: { now: number }) {
           const total = ts.length;
           if (k === 'done' && !allDone) ts = ts.slice(-20);
           return (
-            <div key={k} className="min-w-[11rem] flex-1 flex flex-col">
+            <div key={k} data-board-col={k} className={`min-w-[11rem] flex-1 flex flex-col rounded ${over === k ? 'outline outline-2 outline-sky-500' : ''}`}
+              onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; }} onDragEnter={() => setOver(k)}
+              onDragLeave={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setOver((o) => (o === k ? null : o)); }}
+              onDrop={(e) => { e.preventDefault(); setOver(null); const id = Number(e.dataTransfer.getData('text/plain')); if (id) dropHandlers.get(id)?.(k); }}>
               <h3 className="text-xs uppercase tracking-wide text-slate-400 mb-2">{l} ({total})</h3>
-              <ul aria-label={`${l}, ${total} task${total === 1 ? '' : 's'}`} className="space-y-2 overflow-y-auto">
+              <ul aria-label={`${l}, ${total} task${total === 1 ? '' : 's'}`} className="space-y-2 overflow-y-auto" data-nav-list="column">
                 {ts.length === 0 && <li className="text-xs text-slate-500">No tasks.</li>}
                 {ts.map((t: any) => <TaskCard key={t.id} t={t} now={now} />)}
               </ul>

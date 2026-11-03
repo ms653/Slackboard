@@ -32,6 +32,11 @@ export function NeedsYou() {
   const killOn = boot.system.kill_switch;
   const pending = boot.system.kill_pending_runs;
   const act = async (fn: () => Promise<any>, msg?: string) => { const r = await fn(); await refresh(); if (msg) toast(msg); return r; };
+  /** Same confirm dialog as the task pane (UX §9). */
+  const confirmCancel = (id: number) => setDlg(<Dialog title={`Cancel T-${id}?`} onClose={() => setDlg(null)}>
+    <p className="text-sm mb-3">Queued runs are cancelled and a running agent is stopped.</p>
+    <div className="flex gap-2 justify-end"><button type="button" className="btn bg-slate-700" onClick={() => setDlg(null)}>Keep task</button>
+      <ActionButton label="Cancel task" kind="danger" run={async () => { await act(() => api(`/api/tasks/${id}`, { body: { action: 'cancel' } }), `T-${id} cancelled`); setDlg(null); }} /></div></Dialog>);
   const conflict = (e: any) => { if (e.status === 409 && e.code === 'already_handled') { toast('Already handled'); refresh(); return true; } };
   const blocked = boot.system.blocked_by;
 
@@ -69,7 +74,7 @@ export function NeedsYou() {
     } else if (n.item_type === 'help') {
       body = <><div className="whitespace-pre-wrap">{n.message.body}</div>{task && <div className="text-slate-400 text-xs">T-{task.id} {task.title}</div>}</>;
       actions = <><button className="btn bg-sky-700" onClick={() => open({ kind: 'thread', id: n.thread_id })}>Reply</button>
-        {task && <ActionButton label="Cancel task" kind="danger" run={() => act(() => api(`/api/tasks/${task.id}`, { body: { action: 'cancel' } }), `T-${task.id} cancelled`)} />}</>;
+        {task && <ActionButton label="Cancel task" kind="danger" run={async () => confirmCancel(task.id)} />}</>;
     } else if (n.item_type === 'ready') {
       const art = n.artifact;
       body = <div>T-{task.id} &ldquo;{task.title}&rdquo;{art ? ` · ${JSON.parse(art.files).length} file(s) changed (+${art.lines_added} -${art.lines_removed}) · reviewed (round ${art.review_round})` : ''}</div>;
@@ -85,7 +90,7 @@ export function NeedsYou() {
         {n.artifact && <button className="btn bg-slate-700" onClick={() => open({ kind: 'review', id: n.artifact.id })}>View diff + verdict</button>}
         <ActionButton label="Send back with note" run={async () => setDlg(<NoteDialog title={`Send T-${task.id} back`} label="Note for the worker (required). Review rounds reset to 0 of 2." confirm="Send back"
           onClose={() => setDlg(null)} onDone={async (note) => { const r = await act(() => api(`/api/tasks/${task.id}`, { body: { action: 'unblock', note } })); toast(retryToast(r, task.id)); }} />)} />
-        <ActionButton label="Cancel task" kind="danger" run={() => act(() => api(`/api/tasks/${task.id}`, { body: { action: 'cancel' } }), `T-${task.id} cancelled`)} /></>;
+        <ActionButton label="Cancel task" kind="danger" run={async () => confirmCancel(task.id)} /></>;
     } else if (n.item_type === 'failure') {
       const lj = n.lastJob;
       const hfailed = task?.reason?.includes('help failed');
@@ -93,7 +98,7 @@ export function NeedsYou() {
         <div className="text-slate-300">&ldquo;{task.title}&rdquo;</div></>;
       actions = <>
         <ActionButton label="Retry" kind="primary" run={async () => { const r = await act(() => api(`/api/tasks/${task.id}`, { body: { action: 'unblock' } })); toast(retryToast(r, task.id)); }} />
-        <ActionButton label="Cancel task" kind="danger" run={() => act(() => api(`/api/tasks/${task.id}`, { body: { action: 'cancel' } }), `T-${task.id} cancelled`)} />
+        <ActionButton label="Cancel task" kind="danger" run={async () => confirmCancel(task.id)} />
         {lj && <button className="btn bg-slate-700" onClick={() => open({ kind: 'log', id: lj.id })}>Open log</button>}</>;
     } else if (n.item_type === 'thread_capped') {
       const th = n.thread; const tk = boot.tasks.find((t: any) => t.thread_id === th.id);
@@ -101,7 +106,7 @@ export function NeedsYou() {
       actions = <>
         {!th.cap_raises && <ActionButton label="Raise cap" kind="primary" run={async () => { const r: any = await act(() => api(`/api/threads/${th.id}`, { body: { action: 'raise_cap' } }));
           toast(r.resumed ? `Cap raised. T-${r.resumed.task_id} will resume.` : 'Cap raised.'); }} />}
-        {tk && !['done', 'cancelled'].includes(tk.status) && <ActionButton label="Cancel task" kind="danger" run={() => act(() => api(`/api/tasks/${tk.id}`, { body: { action: 'cancel' } }), `T-${tk.id} cancelled`)} />}
+        {tk && !['done', 'cancelled'].includes(tk.status) && <ActionButton label="Cancel task" kind="danger" run={async () => confirmCancel(tk.id)} />}
         <ActionButton label="Close thread" run={() => act(() => api(`/api/threads/${th.id}`, { body: { action: 'close' } }), tk ? `Thread closed. T-${tk.id} is waiting.` : 'Thread closed')} /></>;
     }
     return (
@@ -126,7 +131,7 @@ export function NeedsYou() {
           className={`px-2 py-0.5 rounded text-xs ${JSON.stringify(filter) === JSON.stringify(f) ? 'bg-sky-800' : 'bg-slate-800'}`} onClick={() => setFilter(f)}>{l}</button>)}
         <span className="ml-auto text-xs text-slate-400">Sort: oldest</span>
       </div>
-      <ul aria-live="polite">
+      <ul aria-live="polite" data-nav-list="inbox">
         {boot.system.kill_switch && pending > 0 && (
           <li className="border-b border-slate-700 p-4 text-sm"><span aria-hidden>■</span> {pending} run{pending > 1 ? 's' : ''} stopped; will be marked when the orchestrator restarts.</li>)}
         {showKilled && (
@@ -143,7 +148,7 @@ export function NeedsYou() {
             {expanded && !killOn && <ul className="mt-2 space-y-1">{killed.map((n: any) => (
               <li key={n.key} className="flex items-center gap-2">T-{n.task.id} {n.task.title}
                 <ActionButton label="Retry" run={async () => { const r = await act(() => api(`/api/tasks/${n.task.id}`, { body: { action: 'unblock' } })); toast(retryToast(r, n.task.id)); }} />
-                <ActionButton label="Cancel task" kind="danger" run={() => act(() => api(`/api/tasks/${n.task.id}`, { body: { action: 'cancel' } }))} /></li>))}</ul>}
+                <ActionButton label="Cancel task" kind="danger" run={async () => confirmCancel(n.task.id)} /></li>))}</ul>}
           </li>)}
         {list.map(card)}
       </ul>

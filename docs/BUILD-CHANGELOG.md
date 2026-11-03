@@ -4,6 +4,7 @@ Round 0: M1-M3 implementation (commits abf4d0c, 1f79190, 81ff2a8)
 Round 1: ENG-1, PM-1, PM-2, PM-3, UX-1, UX-2 (+kill-dialog autofocus, decide validation) -> orchestrator/main.ts, scripts/launch.mjs, app/api/approvals/[id]/decide/route.ts, components/{App,ui,Header,NeedsYou,RightPane,Views}.tsx, package.json, README.md, test/e2e/{kill,s1,http}.test.ts, test/unit/ddl.test.ts
 Round 2: PM-4, PM-5, UX-3, UX-4, UX-5, UX-6 -> README.md, test/e2e/s4.test.ts, components/App.tsx, components/store.ts, components/ui.tsx, components/Views.tsx, lib/server/read.ts, test/unit/badge.test.ts
 Round 3: UX-7, UX-8, UX-9, badge text/countdown -> lib/server/read.ts, components/Header.tsx, components/RightPane.tsx, components/Views.tsx, test/unit/badge.test.ts
+Follow-up F1: F1 budget estimate on result-less attempts, F2 killAll try/catch + early signal handlers + doctor probe pids, F3 tools_missing escalation/revoke, F4 kill-switch precedence, F5 doctor token bind, F6 claim-expired badge, F7 header kill-failed/stopping count/next-run/raise-cap focus, F8 Needs-you cancel confirm, F9 800/1200 breakpoints, F10 quick switcher/j k h l/board DnD -> lib/domain/finish.ts, orchestrator/{main,spawn,doctor,toolserver}.ts, lib/server/read.ts, tailwind.config.ts, components/{App,Header,NeedsYou,RightPane,Views,store}.tsx, components/{QuickSwitcher.tsx,dnd.ts}, README.md, test/unit/followup1.test.ts
 
 ## Status: SIGNED OFF (round 4)
 
@@ -18,16 +19,6 @@ Round 3: UX-7, UX-8, UX-9, badge text/countdown -> lib/server/read.ts, component
 
 Final verification: tsc clean · next build clean · unit 31/31 · e2e 10/10 (S1 with P1–P8, S2, S3, S3b, S4, S5, SIGTERM shutdown, HTTP guards).
 
-### Open non-blocking notes (fix opportunistically)
-- Charge `budget_reserved_usd` when an attempt ends with no `result` (killed or timed out), so the daily estimate isn't undercounted.
-- `killAll` in the SIGTERM handler and `/control/kill` has no try/catch. Register signal handlers before the doctor probes run.
-- On `tools_missing`, escalate SIGTERM to SIGKILL and revoke the token.
-- After crash recovery the card shows "Run failed (orphaned)", where UX §5 asks for "Claim expired, requeued".
-- Header gaps from UX §8–§9:
-  - no "Kill failed" state
-  - no live "Stopping N processes…" count
-  - no "Next run allowed at HH:MM" on the job-cap banner
-  - "Raise cap" always focuses the 5 h field, even when the day cap was hit
-- The inline "Cancel task" buttons in Needs you skip the confirm dialog that the task pane uses.
-- Tailwind breakpoints are 768/1280 px; UX specifies 800/1200 px.
+### Open non-blocking notes
 - Release gate still open: the manual smoke test against the real `claude` binary (TECH §11).
+- F1-F10 resolved in Follow-up F1 (above). Not separately tested: F2 signal ordering and the in-flight doctor-probe kill (covered only by the existing SIGTERM e2e).

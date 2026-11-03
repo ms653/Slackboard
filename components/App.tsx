@@ -5,6 +5,7 @@ import { Header } from './Header';
 import { Sidebar } from './Sidebar';
 import { NeedsYou } from './NeedsYou';
 import { Board, Chat, Settings } from './Views';
+import { QuickSwitcher } from './QuickSwitcher';
 import { RightPane } from './RightPane';
 import { api } from './api';
 import { Presence } from './ui';
@@ -36,7 +37,33 @@ function useLive() {
   }, [refresh, set]);
 }
 
-function useKeys(setHelp: (b: boolean) => void) {
+function focusItem(el: HTMLElement | undefined) { if (el) { el.focus(); el.scrollIntoView?.({ block: 'nearest' }); } }
+const navItems = (list: Element) => Array.from(list.children).filter((c): c is HTMLElement => c.matches('li[tabindex="0"]'));
+
+/** j/k (items in the focused list) and h/l (board columns) navigation, UX §10. */
+function listNav(key: string, active: HTMLElement | null): boolean {
+  if (key === 'j' || key === 'k') {
+    let list = active?.closest('[data-nav-list]') ?? null;
+    if (!list) list = Array.from(document.querySelectorAll('#main [data-nav-list], aside[aria-label="Detail"] [data-nav-list]')).find((l) => navItems(l).length) ?? null;
+    if (!list) return false;
+    const items = navItems(list); if (!items.length) return false;
+    const cur = active?.closest('li[tabindex="0"]') as HTMLElement | null;
+    const i = cur ? items.indexOf(cur) : -1;
+    focusItem(items[key === 'j' ? Math.min(items.length - 1, i + 1) : Math.max(0, i - 1)]);
+    return true;
+  }
+  const cols = Array.from(document.querySelectorAll('[data-board-col]'));
+  if (!cols.length) return false;
+  const cur = active?.closest('[data-board-col]') ?? null;
+  const step = key === 'l' ? 1 : -1;
+  for (let i = cur ? cols.indexOf(cur) + step : 0; i >= 0 && i < cols.length; i += step) {
+    const first = navItems(cols[i].querySelector('[data-nav-list]')!)[0];
+    if (first) { focusItem(first); return true; }
+  }
+  return true;
+}
+
+function useKeys(setHelp: (b: boolean) => void, toggleSwitcher: () => void) {
   const { setView, close, panes, set, open, toast } = useStore();
   const g = useRef(0);
   useEffect(() => {
@@ -44,12 +71,14 @@ function useKeys(setHelp: (b: boolean) => void) {
       const el = e.target as HTMLElement;
       const typing = el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT' || el.isContentEditable);
       if (e.key === 'Escape' && !document.querySelector('[role="dialog"]')) { if (panes.length) close(); return; }
+      if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'k') { e.preventDefault(); toggleSwitcher(); return; }
       if (typing || e.ctrlKey || e.metaKey || e.altKey) return;
       if (e.key === 'g') { g.current = Date.now(); return; }
       if (Date.now() - g.current < 1000) {
         const v = ({ i: 'inbox', c: 'chat', b: 'board', s: 'settings' } as Record<string, View>)[e.key];
         if (v) { e.preventDefault(); setView(v); g.current = 0; return; }
       }
+      if (['j', 'k', 'h', 'l'].includes(e.key) && !document.querySelector('[role="dialog"]')) { if (listNav(e.key, document.activeElement as HTMLElement | null)) e.preventDefault(); return; }
       if (e.key === '/') { e.preventDefault(); (document.querySelector('[data-composer]') as HTMLElement | null)?.focus(); }
       if (e.key === '?') setHelp(true);
       if ((e.key === 'a' || e.key === 'r' || e.key === 'd') && !document.querySelector('[role="dialog"]')) {
@@ -71,16 +100,17 @@ function useKeys(setHelp: (b: boolean) => void) {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [setView, close, panes.length, set, setHelp, open, toast]);
+  }, [setView, close, panes.length, set, setHelp, open, toast, toggleSwitcher]);
 }
 
 export default function App() {
   const { boot, loadError, view, setView, panes, toasts, dismiss, refresh } = useStore();
   const [now, setNow] = useState(Date.now());
   const [help, setHelp] = useState(false);
+  const [switcher, setSwitcher] = useState(false);
   const chose = useRef(false);
   useLive();
-  useKeys(setHelp);
+  useKeys(setHelp, () => setSwitcher((v) => !v));
   useEffect(() => { const i = setInterval(() => setNow(Date.now()), 1000); return () => clearInterval(i); }, []);
   useEffect(() => {
     if (!boot) return;
@@ -138,12 +168,13 @@ export default function App() {
           className={`px-4 py-2 rounded shadow text-sm flex gap-3 ${t.tone === 'error' ? 'bg-rose-800' : 'bg-slate-700'}`}>
           {t.text}<button aria-label="Dismiss" onClick={() => dismiss(t.id)}>✕</button></div>)}
       </div>
+      {switcher && <QuickSwitcher onClose={() => setSwitcher(false)} />}
       {help && (
         <div role="dialog" aria-modal="true" aria-labelledby="help-h" className="fixed inset-0 bg-black/60 z-50 flex items-center justify-center" onClick={() => setHelp(false)}
           onKeyDown={(e) => e.key === 'Escape' && setHelp(false)}>
           <div className="bg-slate-800 rounded-lg p-5 text-sm" onClick={(e) => e.stopPropagation()}>
             <h2 id="help-h" className="font-semibold mb-2">Keyboard shortcuts</h2>
-            <table><tbody>{[['g i / g c / g b / g s', 'Needs you / Chat / Board / Settings'], ['/', 'Focus composer'], ['Enter', 'Open focused card'],
+            <table><tbody>{[['g i / g c / g b / g s', 'Needs you / Chat / Board / Settings'], ['Ctrl/⌘+K', 'Quick switcher (channels, tasks, agents, New task)'], ['j / k', 'Next / previous item in the focused list'], ['h / l', 'Previous / next board column'], ['Drag', 'Board: drop a card on a column (legal moves only)'], ['/', 'Focus composer'], ['Enter', 'Open focused card'],
               ['m', 'Move focused card (legal targets only)'], ['a / r', 'Approve or Accept / Reject or Reopen (focused inbox item or open review pane)'], ['d', 'View diff (focused board card or open task pane)'], ['Esc', 'Close pane or dialog'], ['Ctrl+Shift+K', 'Kill switch'], ['?', 'This help']].map(([k, d]) =>
               <tr key={k}><td className="pr-4 font-mono">{k}</td><td>{d}</td></tr>)}</tbody></table>
             <button autoFocus className="btn bg-slate-700 mt-3" onClick={() => setHelp(false)}>Close</button>
