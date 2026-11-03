@@ -1,0 +1,15 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer components {
+  .btn { @apply inline-flex items-center px-3 py-1 rounded text-sm disabled:opacity-50 disabled:cursor-not-allowed; }
+  .input { @apply bg-slate-900 border border-slate-600 rounded px-2 py-1 text-sm text-slate-100; }
+}
+
+/* Visible 2 px focus ring everywhere (UX §11). */
+:focus-visible { outline: 2px solid #38bdf8; outline-offset: 2px; }
+
+@media (prefers-reduced-motion: reduce) {
+  * { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
+}

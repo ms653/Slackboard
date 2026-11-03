@@ -1,0 +1,110 @@
+#!/usr/bin/env node
+// Fake `claude` for tests and offline demos (TECH §11). Selected via SLACKBOARD_CLAUDE_BIN.
+// Asserts argv/env safety, speaks real MCP to orchestrator/mcp-shim.js, emits stream-json.
+'use strict';
+const fs = require('node:fs');
+const path = require('node:path');
+const { spawn } = require('node:child_process');
+
+const argv = process.argv.slice(2);
+const flag = (f) => { const i = argv.indexOf(f); return i >= 0 ? argv[i + 1] : undefined; };
+function die(msg) { process.stderr.write(`fake-claude argv violation: ${msg}\n`); process.exit(97); }
+if (argv.includes('--version')) { process.stdout.write('0.0.0 (fake claude)\n'); process.exit(0); }
+for (const f of ['-p', '--output-format', '--verbose', '--max-turns', '--max-budget-usd', '--permission-prompts', '--strict-mcp-config', '--mcp-config'])
+  if (!argv.includes(f)) die(`missing ${f}`);
+if (flag('--output-format') !== 'stream-json') die('output-format must be stream-json');
+if (flag('--permission-prompts') !== 'none') die('permission-prompts must be none');
+if (argv.includes('--bare') || argv.some((a) => /bypassPermissions/.test(a))) die('forbidden flag');
+if (!['--session-id', '--resume'].includes(argv[argv.length - 2])) die('--session-id/--resume must be the last argv pair');
+if (Object.keys(process.env).some((k) => k.startsWith('ANTHROPIC_'))) die('ANTHROPIC_* in env');
+
+const prompt = flag('-p');
+const session = argv[argv.length - 1];
+const out = (o) => process.stdout.write(JSON.stringify(o) + '\n');
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const cfg = JSON.parse(fs.readFileSync(flag('--mcp-config'), 'utf8')).mcpServers.slackboard;
+
+// ---- MCP client over the real shim ----
+const shim = spawn(cfg.command, cfg.args, { env: { ...process.env, ...cfg.env }, stdio: ['pipe', 'pipe', 'inherit'] });
+let nextId = 1; const pending = new Map(); let sbuf = '';
+shim.stdout.on('data', (d) => { sbuf += d; let i; while ((i = sbuf.indexOf('\n')) >= 0) { const m = JSON.parse(sbuf.slice(0, i)); sbuf = sbuf.slice(i + 1); pending.get(m.id)?.(m); pending.delete(m.id); } });
+const rpc = (method, params) => new Promise((res) => { const id = nextId++; pending.set(id, res); shim.stdin.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n'); });
+
+const job = (() => {
+  const m = prompt.match(/<job id="(\d+)" kind="(\w+)" agent="(\w+)" attempt="(\d+)"(?: task="T-(\d+)")? thread="(\d+)"(?: review_round="(\d+)")?/);
+  return m ? { id: +m[1], kind: m[2], agent: m[3], attempt: +m[4], task: m[5] ? +m[5] : null, thread: +m[6], round: m[7] ? +m[7] : 0 } : null;
+})();
+const lastUser = (() => { const all = [...prompt.matchAll(/<user_message id="\d+"[^>]*>([\s\S]*?)<\/user_message>/g)]; return all.length ? all[all.length - 1][1] : ''; })();
+const unesc = (s) => s.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&amp;/g, '&');
+
+function defaultSteps(j) {
+  if (!j) {                                                        // doctor probe
+    if (/add_note/.test(prompt)) return [{ tool: { name: 'add_note', input: { task_id: 0, body: 'probe' } } }];
+    if (/Write tool/.test(prompt)) return [{ deny: 'Write' }];
+    return [{ say: 'OK' }];
+  }
+  if (j.agent === 'director' && j.kind === 'respond') {
+    if (j.task) return [{ tool: { name: 'post_message', input: { body: 'Noted. The task continues.' } } }];
+    const title = (unesc(lastUser).replace(/^please\s+/i, '').split(/[.\n]/)[0] || 'Task').slice(0, 80);
+    return [{ tool: { name: 'create_task', input: { title, description: `Objective: ${unesc(lastUser).slice(0, 500)}\nOutput: OUTPUT.md in the workspace root.`,
+      acceptance: '1. OUTPUT.md exists\n2. It addresses the request', why: 'You asked for this in #general.' } } }];
+  }
+  if (j.agent === 'worker' && j.kind === 'work') return [
+    { tool: { name: 'add_note', input: { task_id: j.task, body: 'Plan: write OUTPUT.md' } } },
+    { write: { path: 'OUTPUT.md', content: `# T-${j.task}\n\nDelivered by the fake worker (attempt ${j.attempt}, round ${j.round + 1}).\n` } },
+    { tool: { name: 'update_task', input: { task_id: j.task, action: 'submit_for_review', note: '1. OUTPUT.md written. 2. Addresses the request.' } } }];
+  if (j.agent === 'director' && j.kind === 'review') return [
+    { tool: { name: 'update_task', input: { task_id: j.task, action: 'approve', note: 'All criteria met.' } } },
+    { tool: { name: 'post_message', input: { body: `T-${j.task} is done and reviewed: OUTPUT.md in the task workspace.`, mentions: ['user'] } } }];
+  if (j.agent === 'director' && j.kind === 'help') return [
+    { tool: { name: 'post_message', input: { body: 'Use Markdown. Go ahead.', mentions: ['worker'], wake: true } } }];
+  return [{ say: 'nothing to do' }];
+}
+
+function scriptSteps(j) {
+  const file = process.env.SB_FAKE_SCRIPT; if (!file || !j) return null;
+  const s = JSON.parse(fs.readFileSync(file, 'utf8'));
+  const keys = [`${j.agent}:${j.kind}:a${j.attempt}:r${j.round}`, `${j.agent}:${j.kind}:r${j.round}`, `${j.agent}:${j.kind}:a${j.attempt}`, `${j.agent}:${j.kind}`];
+  for (const k of keys) if (s[k]) return s[k];
+  return null;
+}
+const subst = (v, j) => JSON.parse(JSON.stringify(v).replace(/"\{\{task_id\}\}"/g, String(j?.task ?? 0)).replace(/\{\{task_id\}\}/g, String(j?.task ?? 0))
+  .replace(/\{\{thread_id\}\}/g, String(j?.thread ?? 0)).replace(/\{\{attempt\}\}/g, String(j?.attempt ?? 0)).replace(/\{\{round\}\}/g, String((j?.round ?? 0) + 1)));
+
+(async () => {
+  await rpc('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'fake-claude', version: '0' } });
+  const list = await rpc('tools/list', {});
+  const tools = ['Read', 'Glob', 'Grep', 'Write', 'Edit', ...((list.result && list.result.tools) || []).map((t) => `mcp__slackboard__${t.name}`)];
+  out({ type: 'system', subtype: 'init', session_id: session, model: flag('--model') === 'sonnet' ? 'claude-sonnet-fake' : flag('--model'),
+        tools, mcp_servers: [{ name: 'slackboard', status: 'connected' }] });
+  const steps = subst(scriptSteps(job) || defaultSteps(job), job);
+  let turns = 0, cost = 0, denials = [];
+  let result = { subtype: 'success' };
+  for (const st of steps) {
+    turns++; cost += 0.01;
+    if (st.say) out({ type: 'assistant', message: { content: [{ type: 'text', text: st.say }] } });
+    if (st.sleep) await sleep(st.sleep);
+    if (st.stderr) process.stderr.write(st.stderr + '\n');
+    if (st.hang) { setInterval(() => {}, 1e9); return; }
+    if (st.exit !== undefined) { shim.kill(); process.exit(st.exit); }
+    if (st.result) { result = st.result; }
+    if (st.deny) { denials.push({ tool_name: st.deny }); out({ type: 'system', subtype: 'permission_denied', tool_name: st.deny }); }
+    if (st.write) {
+      const p = path.resolve(process.cwd(), st.write.path);
+      if (!p.startsWith(process.cwd() + path.sep)) { denials.push({ tool_name: 'Write' }); continue; }
+      fs.mkdirSync(path.dirname(p), { recursive: true }); fs.writeFileSync(p, st.write.content);
+      out({ type: 'assistant', message: { content: [{ type: 'tool_use', id: `w${turns}`, name: 'Write', input: { file_path: st.write.path } }] } });
+      out({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: `w${turns}`, is_error: false }] } });
+    }
+    if (st.tool) {
+      const name = `mcp__slackboard__${st.tool.name}`;
+      out({ type: 'assistant', message: { content: [{ type: 'tool_use', id: `t${turns}`, name, input: st.tool.input }] } });
+      const r = await rpc('tools/call', { name: st.tool.name, arguments: st.tool.input });
+      out({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: `t${turns}`, is_error: !!(r.result && r.result.isError), content: r.result?.content }] } });
+    }
+  }
+  out({ type: 'result', subtype: result.subtype, total_cost_usd: result.cost ?? Math.round(cost * 100) / 100, num_turns: result.turns ?? turns,
+        session_id: session, permission_denials: denials, result: result.subtype === 'success' ? 'done' : undefined });
+  shim.stdin.end();
+  setTimeout(() => process.exit(0), 50);
+})().catch((e) => { process.stderr.write(String(e.stack) + '\n'); process.exit(1); });
