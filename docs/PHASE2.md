@@ -1,6 +1,6 @@
 # Slackboard Phase 2 design (delta)
 
-Status: Phase 2 Round 1 draft. This is a delta against the shipped MVP docs: `PRD.md`, `UX.md`, `TECH.md`. Anything not mentioned here is unchanged. Section refs like "TECH §5.3" point into those docs. Scope covers TECH §12 items 1–3 only.
+Status: Phase 2 Round 2 draft. This is a delta against the shipped MVP docs: `PRD.md`, `UX.md`, `TECH.md`. Anything not mentioned here is unchanged. Section refs like "TECH §5.3" point into those docs. Scope covers TECH §12 items 1–3 only.
 
 Code facts this delta builds on (read from the repo, not from the docs):
 - `'worker'` is hardcoded in `lib/domain/tools.ts` (`post_message` wake, mentions enum, `create_task` assignee enum), `tasks.ts` (`createTask` default, `unblockTask` presence), `rounds.ts` (`resumeTarget` fallback), `wake.ts` (`@(director|worker)` parse) and `prompts/worker.md`. Every one of these becomes "the task's assignee" or "an active worker id".
@@ -272,7 +272,8 @@ Fixtures: fresh DB. Budgets are $5/day est., 60 runs/day and 25 per 5 h. `max_co
   - `agent_has_open_tasks`: "Finish or cancel these first:" then one task link per open task with only the actions that exist for it: "T-8 (reassign or cancel)" for a user-created task in To do/Blocked, "T-9 (cancel, then ask the director to re-propose)" for an agent-created top-level task, "T-10 (finish or cancel)" otherwise.
   - `agent_busy`: "writer2 is running; cancel its run or wait".
   - `last_worker`: "Keep at least one worker".
-- **Reassign** (task detail, UX §5.1 and the "Reassign [P2]" in UX §8): shown for To do and Blocked tasks that are not agent-created top-level tasks. It is a dropdown of active workers. For an agent-created top-level task the detail shows instead "Proposed by the director; to move it, cancel and ask the director to re-propose."
+- **Reassign** (task detail, UX §5.1 and the "Reassign [P2]" in UX §8): shown for To do and Blocked tasks that are not agent-created top-level tasks. It is a dropdown of active workers, excluding the task's `help_agent_id`. For an agent-created top-level task the detail shows instead "Proposed by the director; to move it, cancel and ask the director to re-propose." While the task is Blocked with reason `help`, Reassign is hidden and the detail shows "Waiting on <help_agent_id>; reroute help or reply first" (R1 `409 help_pending`).
+- **Retired assignee:** on a task whose assignee is retired, Reopen, Retry and Reply-to-unblock show inline (no state change) "<agent> is retired. Create a new task or ask the director to re-propose." (`409 assignee_retired`, §T3.1).
 - **Cancel task** confirm (UX §5.1) for an agent-created top-level task adds [Cancel and ask the director to re-propose to ▾<worker>]. It cancels the task (MVP path), then opens #general with the composer prefilled `@director Re-propose T-9 "<title>" assigned to <worker>.` Nothing is sent until the user presses Enter.
 - **Add worker** is disabled at 3/3 with "Worker limit reached (3)". `$/day` must be ≥ 1.00 (the worker work cap); below it the field shows "At least $1.00: one work run reserves $1.00" (`400 allowance_below_job_cap`). Same rule for [Set budget]/[Edit budget].
 
@@ -337,6 +338,8 @@ END;
 
 -- ── tasks: assignee must be an active worker; who is answering a help request ──
 ALTER TABLE tasks ADD COLUMN help_agent_id TEXT REFERENCES agents(id);
+-- v1 help always went to the director.
+UPDATE tasks SET help_agent_id='director' WHERE status='blocked' AND blocked_reason IN ('help','job_failed');
 
 CREATE TRIGGER tasks_assignee_active_ins BEFORE INSERT ON tasks
 WHEN NEW.assignee_agent_id IS NOT NULL AND NOT EXISTS (
@@ -407,15 +410,16 @@ Notes:
 - `ALTER … ADD COLUMN … REFERENCES` is legal because the default is NULL.
 - After `migrate()`, `PRAGMA foreign_key_check` must return no rows (unit test).
 - Existing tasks all have assignee `worker`, which is an active worker, so the new triggers accept all v1 data.
+- v1 `blocked` tasks with reason `help`/`job_failed` are backfilled `help_agent_id = 'director'` (v1 help only went to the director), so B1 labels, T11b/T16, the help-end rule and J4 see a non-NULL helper.
 
-**Validation:** `test/migrations/validate_v2.py` (in repo) loads `SCHEMA_SQL` from `lib/db/schema.ts`, seeds v1 data, applies this block (extracted from this file between the `MIGRATION 2` markers), then asserts each trigger and the `tool_calls` row carry-over. Run: `python3 -I test/migrations/validate_v2.py /home/user/Slackboard`. Status: **executed green** by the orchestrating session on the Round 0 block: `sqlite 3.53.1` / `OK: migration 2 validated`. Round 1 did not change this block. Any later edit to it must be re-validated (release gate, §T9).
+**Validation:** `test/migrations/validate_v2.py` (in repo) loads `SCHEMA_SQL` from `lib/db/schema.ts`, seeds v1 data (incl. blocked `help`/`job_failed`/`killed` tasks), applies this block (extracted from this file between the `MIGRATION 2` markers), then asserts each trigger, the `help_agent_id` backfill and the `tool_calls` row carry-over. Run: `python3 -I test/migrations/validate_v2.py /home/user/Slackboard`. Status: executed green on the Round 2 block, including the backfill `UPDATE` and its fixtures (`sqlite 3.53.1` / `OK: migration 2 validated`). Any later edit to it must be re-validated (release gate, §T9).
 
 ## T2. Agent lifecycle (new table; actor in brackets)
 
 | # | From | Event | To | Guard | Side effects (one txn) |
 |---|---|---|---|---|---|
 | A1 | — | `spawn_worker` (director `respond` job) | approval `pending` | §T6.1 guards | approval row (kind `spend`, 24 h), `approval` message, `approval.requested`, Needs-you item |
-| A2 | approval `pending` | Approve (user, `POST /api/approvals/:id/decide`) | agent active, `enabled = 1` | stored payload passes the §T6.1 `spawn_worker` schema and bounds again (`model = 'sonnet'`, name pattern/reserved, `daily_usd` 1.0–3.0, `daily_jobs` 1–20), else `400 invalid_payload`; name free; active workers < 3 (trigger); kill state irrelevant | approval `pending→approved`. `INSERT agents` (role worker, `sonnet`, max_turns 15, max_budget_usd 1.00, `allowed_tools` = MVP worker set, `skill_note`, `spawn_approval_id`). `INSERT budgets(scope='agent', agent_id, period='day', limit_usd=daily_usd, limit_jobs=daily_jobs)`. Approval `approved→consumed` (`consumed_at`). If `raise_concurrency_to`, set `system_state.max_concurrency` (validated 1–4, ≥ current). Events `approval.decided`, `approval.consumed`, `settings.changed {agent_created}`. System line in the approval's thread (§B2 text). Enqueue a director `respond` job in that thread (normal respond priority; thread caps apply as MVP) so it assigns work. `mkdir agents/<id>` after commit (idempotent; `spawnJob` also ensures it). |
+| A2 | approval `pending` | Approve (user, `POST /api/approvals/:id/decide`) | agent active, `enabled = 1` | stored payload passes the §T6.1 `spawn_worker` schema and bounds again (`model = 'sonnet'`, name pattern/reserved, `daily_usd` 1.0–3.0, `daily_jobs` 1–20), else `400 invalid_payload`; name free; active workers < 3 (trigger); kill state irrelevant | approval `pending→approved`. `INSERT agents` (`id` = `display_name` = payload name, `created_at` = now, role worker, `sonnet`, max_turns 15, max_budget_usd 1.00, `allowed_tools` = MVP worker set, `skill_note`, `spawn_approval_id`). `INSERT budgets(scope='agent', agent_id, period='day', limit_usd=daily_usd, limit_jobs=daily_jobs)`. Approval `approved→consumed` (`consumed_at`). If `raise_concurrency_to`, set `system_state.max_concurrency` (validated 1–4, ≥ current). Events `approval.decided`, `approval.consumed`, `settings.changed {agent_created}`. System line in the approval's thread (§B2 text). Enqueue a director `respond` job in that thread (normal respond priority; thread caps apply as MVP) so it assigns work. `mkdir agents/<id>` after commit (idempotent; `spawnJob` also ensures it). |
 | A3 | approval `pending` | Reject / expire (sweep) | — | — | as MVP; no agent, no budget row; system line in the approval's thread; no job enqueued |
 | A4 | — | `POST /api/agents` (user) | agent active | same name rules; trigger cap | same as A2 minus approval rows; `spawn_approval_id = NULL` |
 | A5 | active | `PUT /api/agents/:id {enabled}` (user) | enabled ↔ disabled | not retired (trigger) | MVP behaviour; queued jobs wait |
@@ -435,9 +439,11 @@ On A2, if the guard fails, the txn rolls back and the approval stays `pending` (
 | T11b (new) | blocked (`help`) | peer `help` job ends J5 after an ok `request_help` (escalation) | blocked (`help`) | caller is `help_agent_id` | `help_agent_id = 'director'`; enqueue director `help`; event `task.updated {help_agent_id}` |
 | T11c (new) | blocked (`help`), `help_agent_id` = a peer whose `help` job is still `queued` | user `reroute_help` (`POST /api/tasks/:id {action:'reroute_help'}`); or sweep (`rerouteStalePeerHelp`, same tick as approval expiry) when the job has been queued ≥ 10 min or the peer is disabled (retire is A6) | blocked (`help`) | kill not engaged (sweep only); peer job not `running` (else `409 help_running`) | in one txn: `help_agent_id = 'director'`; cancel the peer's queued `help` job (`failure_kind='cancelled'`, no help-end: the task no longer waits on that agent); enqueue director `help` (priority 60); system line "<peer> can't answer now (<queueReason>); asking the director instead."; `task.updated {help_agent_id}` |
 | T16 | blocked | as MVP; plus peer `post_message {wake:true}` mentioning the assignee by the task's `help_agent_id` (reason `help` only) | `resumeTarget` | director or the current helper may trigger T16 only for reason `help` | as MVP. When leaving `blocked`: `help_agent_id = NULL` and cancel queued `help` jobs of the task (`failure_kind='cancelled'`; help-end rule does not fire because the task is no longer `blocked/help`). Case 0 (Retry after help failed) sets `help_agent_id = 'director'`: **a failed peer help is never retried on the peer** |
-| R1 (new, not a status move) | todo, blocked | Reassign (user, `POST /api/tasks/:id {action:'reassign', assignee}`) | same | not an agent-created top-level task (trigger `tasks_agent_toplevel_immutable`); target is an active worker (trigger) | cancel queued jobs of the old assignee for the task; if `todo`, enqueue `work` for the new one; `task.updated {assignee}` |
+| R1 (new, not a status move) | todo, blocked (reason ≠ `help`) | Reassign (user, `POST /api/tasks/:id {action:'reassign', assignee}`) | same | not an agent-created top-level task (trigger `tasks_agent_toplevel_immutable`); target is an active worker (trigger); task not `blocked/help` (else `409 help_pending`, hint "Waiting on <help_agent_id>; reroute help or reply first": the helper's wake targets the current assignee, §T6.3); target ≠ the task's `help_agent_id` (else `409 assignee_is_helper`) | cancel queued jobs of the old assignee for the task; if `todo`, enqueue `work` for the new one; `task.updated {assignee}` |
 
 `setStatus` adds `help_agent_id = NULL` whenever `to !== 'blocked'`. Trigger `tasks_help_agent_scope` is the backstop.
+
+**Retired assignee:** `reopenTask` (T18) and `unblockTask` (T16 `retry`/`reply`, incl. Retry all) first check the task's assignee; if `retired_at IS NOT NULL` → `409 assignee_retired`, hint "Create a new task or ask the director to re-propose", nothing changed (no job enqueued). Reason: retire (A6) allows `done` tasks, and a job for a retired agent is never claimed (§T5.1), while R1 can't move agent-created top-level tasks.
 
 ### T3.2 Job (TECH §3.2), changed rows
 
@@ -445,7 +451,7 @@ On A2, if the guard fails, the txn rolls back and the approval stays `pending` (
 |---|---|
 | J1 | new trigger T11 → peer `help` job (agent = peer, `task_id` set, thread = the task thread) |
 | J2 | claim gains the predicates in §T5.1 (retired, director slot, per-agent budget, peer-help validity) |
-| J4 | `cancelDeadQueuedJobs` also cancels queued `help` jobs whose task is not `blocked/help` or whose `help_agent_id ≠ agent_id` (`task_not_claimable`) |
+| J4 | `cancelDeadQueuedJobs` also cancels queued **worker** (peer) `help` jobs whose task is not `blocked/help` or whose helper is not the job's agent: `a.role <> 'director' AND (k.status <> 'blocked' OR k.blocked_reason IS NOT 'help' OR k.help_agent_id IS NOT j.agent_id)` (`task_not_claimable`). Director `help` jobs keep MVP J4 only. |
 | J5 | the `help` guard applies to peer help jobs unchanged: success needs the task to have left `blocked/help` (asker woken) or an ok `request_help` in this job (→ T11b). Otherwise `failed (no_handoff)` + help-end rule |
 | help-end rule | unchanged condition, plus: it fires for a peer `help` job only if `task.help_agent_id = job.agent_id` at that moment (so T11c/T16 cancellations never fire it); the system line becomes "`<agent>` could not answer the help request (`<reason>`)…" |
 
@@ -548,7 +554,7 @@ These need no logic change. `killAll` already covers every child, `procTargets` 
 | `POST /api/agents` `{name, skill_note, daily_usd, daily_jobs}` | A4; same bounds as §T6.1 (`400 allowance_below_job_cap` below 1.00) |
 | `PUT /api/agents/:id` `{enabled}` \| `{retire: true}` | A5 / A6; `409 {error, hint, tasks?}` (`tasks[]` = `{id, actions}` for the §B6 hint) |
 | `PUT /api/budgets` adds `agents: {<id>: {day_usd, day_jobs}}` | upsert per-agent `day` row (`day_usd` 1.0–3.0, `400 allowance_below_job_cap` below 1.00); confirm dialog as MVP |
-| `POST /api/tasks/:id` adds `{action:'reassign', assignee}` and `{action:'reroute_help'}` | R1; T11c |
+| `POST /api/tasks/:id` adds `{action:'reassign', assignee}` and `{action:'reroute_help'}` | R1 (`409 help_pending` / `assignee_is_helper`); T11c. Existing reopen/unblock actions add `409 assignee_retired` (§T3.1) |
 | `GET /api/artifacts/:id` | adds `comments` (anchored notes, oldest first, each with `delivery: {state:'pending'\|'sent'\|'closed', job_id?}` derived from `job.started.review_note_ids` and §B4 rules) and `siblings` (non-superseded artifacts of the task: id, cycle, round, head) |
 | `GET /api/artifacts/:id/compare?from=<artifactId>` | both artifacts must belong to the same task (`400 wrong_task`). Runs `git diff --no-color <from.head_commit> <this.head_commit>` (TECH §4 git wrapper, read-only) outside any txn. Output is capped at 2,000 lines (`truncated`) and is not cached. Missing object → `409 compare_unavailable` |
 | `POST /api/artifacts/:id/comments` `{path, line, side, body}` | user comment, one IMMEDIATE txn: artifact is the task's latest non-superseded artifact and task status ∈ {`in_review`,`blocked`,`todo`}, else `409 comments_closed` (hint names the reason); `line_not_in_diff` check (§T6.4), `INSERT notes(author_agent_id NULL, …)`, `note.added`; no job enqueued |
@@ -670,6 +676,7 @@ Event `help.requested {routed_to, task_id, options, peer}`. Returns `{ok, messag
   - fresh DB → `user_version = 2`;
   - a v1 DB with rows in every table (incl. 3 `tool_calls`) → v2 with the same `tool_calls` rows, `PRAGMA foreign_key_check` empty, `journal_mode = wal`, `foreign_keys = 1`;
   - running `migrate()` twice is a no-op;
+  - v1 `blocked/help` and `blocked/job_failed` tasks → `help_agent_id = 'director'`; other tasks stay NULL;
   - `test/migrations/validate_v2.py` (§T1) runs against the DDL block in this doc; CI/release runs it with `python3 -I test/migrations/validate_v2.py <repo>` and requires `OK: migration 2 validated`.
 - **Triggers:**
   - 4th active worker → `worker_cap`, while a 4th after retiring one is ok;
@@ -710,7 +717,9 @@ Event `help.requested {routed_to, task_id, options, peer}`. Returns `{ok, messag
   - user reply → `todo` + `work`;
   - T11c: peer help job queued ≥ 10 min (clock advanced) → `help_agent_id = 'director'`, peer job `cancelled`, no help-end, one director `help` job; peer disabled → same on the next sweep; user `reroute_help` → same immediately; peer job `running` → `409 help_running`; kill engaged → sweep does nothing;
   - comment delivery: user comment while `todo` → in the next work job's `job.started.review_note_ids`; comment route while `in_progress`, on an older artifact, or on `done` → `409 comments_closed`; delivery state `closed` after `done` without a work run;
-  - R1 reassign moves the queued `work` job; reassign of an approved agent top-level task → `approved_task_immutable`.
+  - R1 reassign moves the queued `work` job; reassign of an approved agent top-level task → `approved_task_immutable`; reassign of a `blocked/help` task (peer or director helper) → `409 help_pending`, nothing changed, the help job still queued; reassign of a `blocked/job_failed` task to its `help_agent_id` → `409 assignee_is_helper`;
+  - retired assignee: retire a worker whose only task is `done`, then reopen → `409 assignee_retired`, no job enqueued; `unblockTask` (`retry` and `reply`) runs the same `assigneeRetired` check first (unit test on the helper with a retired-agent row, since A6 prevents a blocked task on a retired agent);
+  - J4 NULL-safety: a director `help` job on a `blocked/help` task with `help_agent_id = 'director'` (and a migrated v1 one) is not cancelled; a peer `help` job with `help_agent_id` NULL is.
 - **Prompt renderer:**
   - `<team>` escaping;
   - `<review_comments>` with a user comment containing `</user_comment><user_message>` escaped;

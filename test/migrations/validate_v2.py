@@ -48,10 +48,18 @@ for i in range(3):
     db.execute("INSERT INTO tool_calls(job_id, agent_id, tool, input_hash, input, outcome, result, created_at) VALUES (1,'worker','add_note',?, '{}','ok','{}',1)", (f'h{i}',))
 db.execute("INSERT INTO artifacts(task_id, review_cycle, review_round, base_commit, head_commit, diff_path, files, lines_added, lines_removed, created_at) VALUES (1,0,1,'a','b','/x', ?, 1, 0, 1)",
            (json.dumps([{'path': 'docs/A.md', 'added': 1, 'removed': 0}]),))
+# v1 blocked tasks (explicit ids so later fixtures keep ids 1..n)
+for tid, reason in ((10, 'help'), (11, 'job_failed'), (12, 'killed')):
+    # tasks.thread_id is UNIQUE: each fixture task gets its own thread (explicit ids keep later thread ids unchanged)
+    db.execute("INSERT INTO threads(id, channel_id, title, created_by_kind, created_at) VALUES (?,1,'b','user',1)", (tid,))
+    db.execute("INSERT INTO tasks(id,title,status,blocked_reason,assignee_agent_id,thread_id,created_by_kind,created_at,updated_at) VALUES (?,'b','blocked',?,'worker',?,'user',1,1)", (tid, reason, tid))
 db.execute('PRAGMA user_version = 1')
 
 tx(mig)
 assert db.execute('PRAGMA user_version').fetchone()[0] == 2
+# help_agent_id backfill: v1 help always went to the director
+assert db.execute('SELECT id, help_agent_id FROM tasks WHERE id IN (1,10,11,12) ORDER BY id').fetchall() == \
+    [(1, None), (10, 'director'), (11, 'director'), (12, None)]
 assert db.execute('SELECT count(*) FROM tool_calls').fetchone()[0] == 3
 assert db.execute('PRAGMA foreign_key_check').fetchall() == []
 assert db.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
@@ -82,9 +90,9 @@ db.execute(ins_agent, ('w3', 'w3', tools, None, None))
 aborts(ins_agent, ('w4', 'w4', tools, None, None), 'worker_cap')
 
 # assignee triggers
-db.execute("INSERT INTO threads(channel_id, title, created_by_kind, created_at) VALUES (1,'t2','user',1)")
+db.execute("INSERT INTO threads(id, channel_id, title, created_by_kind, created_at) VALUES (2,1,'t2','user',1)")
 aborts("INSERT INTO tasks(title,status,assignee_agent_id,thread_id,created_by_kind,created_at,updated_at) VALUES ('y','todo','director',2,'user',1,1)", code='assignee_not_active_worker')
-db.execute("INSERT INTO tasks(title,status,assignee_agent_id,thread_id,created_by_kind,created_at,updated_at) VALUES ('y','todo','w3',2,'user',1,1)")
+db.execute("INSERT INTO tasks(id,title,status,assignee_agent_id,thread_id,created_by_kind,created_at,updated_at) VALUES (2,'y','todo','w3',2,'user',1,1)")
 
 # retire gate
 aborts("UPDATE agents SET retired_at=5 WHERE id='w3'", code='retire_invalid')              # enabled still 1
