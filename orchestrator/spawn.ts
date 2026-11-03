@@ -23,13 +23,13 @@ export interface SpawnCtx { db: DB; me: string; children: Map<number, Child>; to
   toolPort: () => number; bin: () => string; sep: () => string }
 
 export const ENV_ALLOW = ['PATH', 'HOME', 'USER', 'LOGNAME', 'SHELL', 'LANG', 'LC_ALL', 'TMPDIR', 'TERM'];
-export function childEnv(extra: Record<string, string> = {}): Record<string, string> {
+export function childEnv(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
   const env: Record<string, string> = {};
   for (const k of ENV_ALLOW) if (process.env[k] !== undefined) env[k] = process.env[k]!;
   // test-only passthroughs for the fake binary (never ANTHROPIC_*)
   for (const k of ['SB_FAKE_SCRIPT', 'SB_FAKE_STATE']) if (process.env[k]) env[k] = process.env[k]!;
   env.CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH = '1';
-  return { ...env, ...extra };
+  return { ...env, ...extra } as unknown as NodeJS.ProcessEnv;
 }
 const PLANTED = ['CLAUDE.md', 'CLAUDE.local.md', '.mcp.json', '.claude'];
 export function scrubCwd(cwd: string): void {
