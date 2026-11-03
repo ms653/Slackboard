@@ -1,0 +1,35 @@
+{
+  "name": "slackboard",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local single-user agent workspace: Slack-style chat + live kanban for claude -p agents",
+  "scripts": {
+    "dev": "next dev -H 127.0.0.1 -p 3000",
+    "build": "next build && npm run build:orch",
+    "build:orch": "esbuild orchestrator/main.ts --bundle --platform=node --target=node20 --format=cjs --external:better-sqlite3 --outfile=dist/orchestrator/main.js",
+    "start": "node scripts/launch.mjs",
+    "orchestrator": "node dist/orchestrator/main.js",
+    "doctor": "node dist/orchestrator/main.js --doctor-only",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.7.0",
+    "next": "14.2.35",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "zustand": "4.5.5"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.12",
+    "@types/node": "^20.17.10",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "autoprefixer": "^10.4.20",
+    "esbuild": "^0.24.2",
+    "postcss": "^8.4.49",
+    "tailwindcss": "^3.4.17",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}
