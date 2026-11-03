@@ -17,7 +17,7 @@ function orchestratorStatus(s: any): 'up' | 'stale' | 'down' {
 }
 
 /** Card lines derived once, server-side (UX §5). */
-function decorate(t: TaskRow, ny: Set<string>, extra: { threadStatus: string; capRaises: number; replies: number; cost: number; files: number; drift: boolean; hfailed: boolean; escalated: boolean; redo: boolean }) {
+function decorate(t: TaskRow, ny: Set<string>, extra: { threadStatus: string; capRaises: number; replies: number; cost: number; files: number; drift: boolean; hfailed: boolean; escalated: boolean; redo: boolean; badge: string | null }) {
   let reason: string | null = null;
   if (t.status === 'blocked') {
     reason = ({ help: extra.escalated ? 'Blocked: waiting on you (help)' : 'Blocked: waiting on director (help)', review_cap: 'Blocked: you need to decide (review limit)',
@@ -34,7 +34,7 @@ function decorate(t: TaskRow, ny: Set<string>, extra: { threadStatus: string; ca
     : ny.has(`thread_capped:${t.thread_id}`) ? 'Thread capped' : null;
   const round = t.review_round > 0 || extra.redo ? `round ${extra.redo ? t.review_round + 1 : t.review_round} of 2${extra.redo ? ', redo' : ''}` : null;
   const done = t.status === 'done' ? (t.parent_id ? 'Done' : t.accepted_at ? 'Accepted' : 'Ready, not accepted') : null;
-  return { ...t, reason, waiting, flag, round, done, replies: extra.replies, cost: extra.cost, files: extra.files };
+  return { ...t, reason, waiting, flag, round, done, replies: extra.replies, cost: extra.cost, files: extra.files, badge: extra.badge };
 }
 
 export function bootstrap() {
@@ -74,8 +74,20 @@ export function bootstrap() {
     const escalated = !!d.prepare(`SELECT 1 FROM messages WHERE thread_id=? AND kind='help' AND EXISTS (SELECT 1 FROM json_each(mentions) WHERE value='user')`).get(t.thread_id);
     const redo = !!d.prepare(`SELECT 1 FROM artifacts WHERE task_id=? AND review_cycle=? AND review_round=? AND verdict='superseded'`).get(t.id, t.review_cycle, t.review_round + 1)
       && ['todo', 'in_progress'].includes(t.status);
+    const lastJob = d.prepare(`SELECT status, attempts, max_attempts, failure_kind, run_after FROM jobs WHERE task_id=? ORDER BY id DESC LIMIT 1`).get(t.id) as any;
+    let badge: string | null = null;
+    if (lastJob?.status === 'queued' && lastJob.attempts > 0 && lastJob.failure_kind) {
+      const secs = Math.max(0, Math.ceil((lastJob.run_after - now()) / 1000));
+      badge = `✕ Run failed (${lastJob.failure_kind}). Retrying in ${secs} s (${lastJob.attempts}/${lastJob.max_attempts})`;
+    } else if (s.kill_switch && orchestratorStatus(s) === 'down' && d.prepare(`SELECT 1 FROM jobs WHERE task_id=? AND status='running'`).get(t.id)) {
+      badge = '⏸ Stopped by kill, waiting for orchestrator';
+    } else if (t.status === 'todo' && d.prepare(`SELECT 1 FROM events WHERE type='task.status_changed' AND entity_type='task' AND entity_id=? AND actor='system' AND ts>=?
+        AND json_extract(payload,'$.from')='in_progress' AND json_extract(payload,'$.to')='todo'`).get(String(t.id), now() - 10_000)
+      && !d.prepare(`SELECT 1 FROM jobs WHERE task_id=? AND failure_kind IS NOT NULL AND (finished_at>=? OR status='queued')`).get(t.id, now() - 10_000)) {
+      badge = '⟲ Claim expired, requeued';
+    }
     return decorate(t, keys, { threadStatus: t.thread_status, capRaises: t.cap_raises, replies, cost, files: art ? JSON.parse(art.files).length : 0,
-      drift: lastFail?.failure_kind === 'workspace_drift', hfailed: helpFailed(d, t), escalated, redo });
+      drift: lastFail?.failure_kind === 'workspace_drift', hfailed: helpFailed(d, t), escalated, redo, badge });
   });
   const threads = d.prepare(`SELECT th.*, (SELECT id FROM tasks WHERE thread_id=th.id) AS task_id,
       (SELECT body FROM messages WHERE thread_id=th.id ORDER BY id LIMIT 1) AS first_body,

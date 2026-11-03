@@ -53,11 +53,30 @@ Send "Please write INSTALL.md" in #general, approve the proposal in **Needs you*
   - A restart recovers orphaned runs.
   - Tool side effects are recorded exactly once per (job, tool, input).
 
+## Non-goals
+
+Per PRD §4:
+- no Bash, web, email or other external executors for agents
+- no API-key path (the CLI login is used; an `ANTHROPIC_API_KEY` is flagged)
+- no `bypassPermissions` mode
+- no multi-user or remote access (single user, localhost only)
+- cost figures are an estimate, not a bill
+
+## Risks and limits
+
+Mitigations are in PRD §7.
+- **Shared Pro/Max allowance:** budgets and job caps limit use, and you can pause or kill at any time.
+- **Headless limit behaviour is unverified:** a usage-limit failure pauses the queue and shows a banner.
+- **Estimated cost:** the dollar figures are estimates, so treat the job caps as the hard limit.
+- **ToS caveat:** intended for "ordinary individual usage" only. Never share your login, and run it for one user only.
+- **Rubber-stamp review:** you approve every diff and external action yourself, and the review is capped at 2 rounds.
+- **Prompt injection:** untrusted content is escaped and fenced, and agents have no send, spend or post tools.
+
 ## Tests
 
 ```bash
 npm test             # unit: DDL/triggers, claim gates, task + job state machines, review loop with real git
-npm run test:e2e     # end-to-end with the real orchestrator + fake claude: PRD S1 (P1–P8), S2, S3, S3b, S5
+npm run test:e2e     # end-to-end with the real orchestrator + fake claude: PRD S1 (P1–P8), S2, S3, S3b, S4, S5
 ```
 
 ## Data

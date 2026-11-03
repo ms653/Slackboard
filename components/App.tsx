@@ -109,7 +109,7 @@ export default function App() {
           <Presence a={a} now={now} pauseLabel={PAUSE_LABEL[boot.system.blocked_by] ?? undefined} />
           {a.presence === 'working' && a.presence_detail ? <span className="text-slate-400 truncate max-w-[10rem]">{a.presence_detail}</span> : null}</li>)}
       </ul>
-      <div className="flex-1 flex min-h-0">
+      <div className="flex-1 flex min-h-0 relative">
         <Sidebar now={now} />
         <main id="main" className="flex-1 min-w-0 flex flex-col">
           {view !== 'settings' && (
@@ -129,7 +129,7 @@ export default function App() {
           </div>
         </main>
         {pane && (
-          <aside aria-label="Detail" className="w-[420px] max-w-full shrink-0 border-l border-slate-700 bg-slate-900 xl:static fixed inset-y-0 right-0 z-40 xl:z-auto">
+          <aside aria-label="Detail" className="w-[420px] max-w-full shrink-0 border-l border-slate-700 bg-slate-900 xl:static absolute inset-y-0 right-0 z-40 xl:z-auto">
             <RightPane pane={pane} />
           </aside>)}
       </div>
