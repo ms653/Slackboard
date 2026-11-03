@@ -15,7 +15,7 @@ Platforms: macOS and Linux. Windows is out of scope (process-group semantics, §
    app/api/* route handlers        │  shared code: lib/db, lib/domain (all
    lib/domain (transactions)       │  state transitions live here, once)
                                    ▼
- Orchestrator process (node orchestrator/main.js --sb-orchestrator) ── never imported by Next.js
+ Orchestrator process (node dist/orchestrator/main.js) ── never imported by Next.js
    scheduler loop, leases, budgets, kill switch, crash recovery
    tool server  http://127.0.0.1:<ephemeral>/rpc   (+ /control for kill/wake)
    spawns ──► claude -p ... (one process group per job)
@@ -23,7 +23,7 @@ Platforms: macOS and Linux. Windows is out of scope (process-group semantics, §
 ```
 
 Decisions:
-- **The orchestrator is a separate long-lived Node process**, started next to Next.js by `scripts/launch.mjs` (`npm start`), which starts it as `node orchestrator/main.js --sb-orchestrator` (`main.js` is emitted by `tsc` from `orchestrator/main.ts` in the build step, §5.2) and passes the same `SLACKBOARD_CLAUDE_BIN` (if set) in the env of both processes (`killVerified` runs in Next.js, §5.7). Next.js route handlers are request-scoped and restart on HMR; child processes spawned there would be orphaned and module state lost. Next.js never spawns `claude`.
+- **The orchestrator is a separate long-lived Node process**, started next to Next.js by `scripts/launch.mjs` (`npm start`), which starts it as `node dist/orchestrator/main.js` (bundled by esbuild from `orchestrator/main.ts` in `npm run build`, §5.2) and passes the same `SLACKBOARD_CLAUDE_BIN` (if set) in the env of both processes (`killVerified` runs in Next.js, §5.7). Next.js route handlers are request-scoped and restart on HMR; child processes spawned there would be orphaned and module state lost. Next.js never spawns `claude`.
 - **The database is the only channel between the two processes.** Next.js writes user actions (and enqueues jobs in the same transaction via `lib/domain`); the orchestrator polls `jobs` every 1 s. Next.js also calls `POST /control/wake`, `/control/kill` and `/control/cancel {job_id}` on the orchestrator (admin token from `~/.slackboard/control.token`, mode 0600) for low latency only; the 1 s poll is the fallback. Next.js never moves a `running` job: to stop one it sets `jobs.cancel_requested = 1` in its txn and the orchestrator kills the child and finishes the row (J16/J17). Sole exception to "Next.js touches no process": the kill fallback (§5.9 step 1) signals verified process groups when the orchestrator is unreachable or stale; it still writes no job or task row (the orchestrator finishes them, §5.7).
 - **Live UI:** `GET /api/stream?after=<eventId>` (SSE, `runtime='nodejs'`, `dynamic='force-dynamic'`) polls `events` by id every 250 ms. Zustand applies events; on reconnect the client resumes from its last id.
 - **Localhost only:** Next.js runs `next start -H 127.0.0.1`; middleware rejects any `Host` other than `127.0.0.1:<port>` / `localhost:<port>` (DNS rebinding) and any mutating request whose `Origin` differs or lacks the `sb_session` cookie (random 32 bytes, issued on page load, `HttpOnly; SameSite=Strict`). The tool server binds `127.0.0.1` and rejects non-loopback peers.
@@ -42,7 +42,7 @@ Decisions:
 | `GET /api/jobs/:id/log` | read-only: last 200 transcript lines from `stdout.jsonl`, `failure_kind`, `error`, `exit_code` |
 | `POST /api/approvals/:id/decide` `{decision, note}` | the only writer of approval decisions |
 | `POST /api/threads/:id` `{action: close\|reopen\|raise_cap}` | thread lifecycle (§3.3); `reopen`/`raise_cap` apply the thread resume rule and return `{status, resumed: {task_id, kind} \| null}` (`status` = the thread's new status; reopen of a thread at its cap returns `status: 'capped', resumed: null`; UX.md §5 toasts) |
-| `POST /api/kill`, `POST /api/resume` | kill switch (§5.9); `/api/kill` returns `{ok, path: 'orchestrator'\|'direct', survivors?: pid[]}` (`survivors` on the direct path only); `/api/resume` returns `409 kill_recovery_pending` (hint: count of `running` rows) while any `jobs.status = 'running'` row exists unless the orchestrator is verified live (`isOrchestrator(orchestrator_pid)`: alive with an exact `--sb-orchestrator` argv token, §5.7; heartbeat ≤ `ORCH_STALE_MS` old) **and** every running row's `lease_owner = orchestrator_id` (§5.9 step 5) |
+| `POST /api/kill`, `POST /api/resume` | kill switch (§5.9); `/api/kill` returns `{ok, path: 'orchestrator'\|'direct', survivors?: pid[]}` (`survivors` on the direct path only); `/api/resume` returns `409 kill_recovery_pending` (hint: count of `running` rows) while any `jobs.status = 'running'` row exists unless the orchestrator is verified live (`isOrchestrator(orchestrator_pid)`: alive and its start time equals `orchestrator_proc_start`, §5.7; heartbeat ≤ `ORCH_STALE_MS` old) **and** every running row's `lease_owner = orchestrator_id` (§5.9 step 5) |
 | `PUT /api/budgets` `{day_usd, day_jobs, jobs_5h, max_concurrency}` | budget/cap edits (user only; Settings, UX.md §12); event `settings.changed {old, new}` |
 | `PUT /api/agents/:id` `{enabled}` | enable/disable an agent (Settings) |
 | `POST /api/doctor` | re-run doctor via `/control/doctor`; report lands in `system_state.doctor_report` |
@@ -286,6 +286,7 @@ CREATE TABLE jobs (
   heartbeat_at        INTEGER,
   last_output_at      INTEGER,
   pid                 INTEGER,                       -- also the process-group id (detached spawn)
+  proc_start          TEXT,                          -- start time of pid, written with pid (§6.2); identity check (§5.7)
   run_token_hash      TEXT,                          -- sha256 hex; NULL when not running
   cancel_requested    INTEGER NOT NULL DEFAULT 0 CHECK (cancel_requested IN (0,1)),  -- set by Next.js; only the orchestrator finishes the row (J16/J17)
   budget_cap_usd      REAL NOT NULL CHECK (budget_cap_usd > 0 AND budget_cap_usd <= 5),  -- set at enqueue from §6.1 (role, kind); passed as --max-budget-usd
@@ -422,6 +423,7 @@ CREATE TABLE system_state (
   pause_reason              TEXT CHECK (pause_reason IS NULL OR pause_reason IN ('usage_limit','user')),
   orchestrator_id           TEXT,
   orchestrator_pid          INTEGER,
+  orchestrator_proc_start   TEXT,                    -- start time of orchestrator_pid (§5.7 isOrchestrator)
   orchestrator_heartbeat_at INTEGER,
   tool_server_port          INTEGER,
   max_concurrency           INTEGER NOT NULL DEFAULT 2 CHECK (max_concurrency BETWEEN 1 AND 4),
@@ -597,9 +599,11 @@ Workers can never wake the director by chatting (only via `request_help` or `sub
 ### 5.2 Main loop
 
 ```ts
-// orchestrator/main.ts — separate process. Build: `tsc` emits orchestrator/main.js; scripts/launch.mjs runs
-// `node orchestrator/main.js --sb-orchestrator`. At startup main exits 1 with "missing --sb-orchestrator argv marker"
-// if process.argv lacks that exact token (otherwise isOrchestrator could never recognise it).
+// orchestrator/main.ts — separate process. Build (`npm run build` = `next build && npm run build:orch`):
+//   build:orch = esbuild orchestrator/main.ts --bundle --platform=node --target=node20 --format=cjs
+//                --external:better-sqlite3 --outfile=dist/orchestrator/main.js
+// (output is CommonJS; esbuild resolves the `@/` alias from tsconfig.json `paths`, so lib/* is bundled in).
+// scripts/launch.mjs runs `node dist/orchestrator/main.js`. Identity is pid + start time (§5.7), no argv marker.
 const LEASE_MS = 60_000, HEARTBEAT_MS = 15_000, IDLE_MS = 180_000;
 const WALL_MS = { respond: 240_000, help: 240_000, review: 360_000, work: 900_000 };
 const ME = `${os.hostname()}:${process.pid}:${ulid()}`;
@@ -608,9 +612,10 @@ const children = new Map<number, Child>();   // jobId -> { pid, killedFor?, last
 async function boot() {
   acquireSingleton();          // IMMEDIATE txn: if orchestrator_pid != process.pid && isOrchestrator(orchestrator_pid) -> exit(1),
                                //   regardless of heartbeat age (age is only logged as a hint);
-                               //   else set orchestrator_id=ME, orchestrator_pid=process.pid, orchestrator_heartbeat_at=now.
-                               // isOrchestrator(p) = isAlive(p) && an exact argv token of p equals '--sb-orchestrator' (lib/proc, §5.7;
-                               //   marker added by scripts/launch.mjs; works under node, tsx, ts-node).
+                               //   else set orchestrator_id=ME, orchestrator_pid=process.pid,
+                               //   orchestrator_proc_start=procStart(process.pid), orchestrator_heartbeat_at=now.
+                               // isOrchestrator(p) = isAlive(p) && procStart(p) === orchestrator_proc_start (lib/proc, §5.7;
+                               //   pid and start time read in one SELECT; no argv test).
                                // If a wedged-but-alive orchestrator blocks start: launch prints "orchestrator pid N alive; kill it
                                //   to restart" and exits 1; `doctor` shows the same pid. Operator action: kill that pid, rerun npm start.
                                // Resume stays 409 during recoverOrphans because the old rows' lease_owner != ME (§5.9 step 5 (c)).
@@ -652,7 +657,7 @@ UPDATE jobs
        last_output_at = :now, started_at = :now, finished_at = NULL,
        run_token_hash = :token_hash, budget_reserved_usd = budget_cap_usd, error = NULL, failure_kind = NULL,
        session_id = CASE WHEN session_started = 1 THEN session_id ELSE :new_uuid END,  -- argv value, written before spawn
-       pid = NULL                                                                      -- set right after spawn() (§6.2)
+       pid = NULL, proc_start = NULL                                                   -- set right after spawn() (§6.2)
  WHERE status = 'queued'
    AND (SELECT kill_switch = 0 AND ifnull(paused_until, 0) <= :now AND pause_reason IS NOT 'user'
           FROM system_state WHERE id = 1)
@@ -704,11 +709,11 @@ function kill(c, why) {           // whole process group: claude + MCP shim + an
   try { process.kill(-c.pid, 'SIGTERM'); } catch {}
   setTimeout(() => { try { process.kill(-c.pid, 'SIGKILL'); } catch {} }, 3000);
 }
-function sweep() {               // every 5 s
+async function sweep() {         // every 5 s; skipped while a previous sweep is still running
   // expired task claims with no running job -> T9
   // orphaned jobs, REGARDLESS of lease_owner (covers our own crash between claim and spawn, or a
   // finishAttempt that threw): status='running' AND lease_expires_at < now AND id NOT IN children
-  //   -> sweepByMarker(`--sb-job=${id}`); finishAttempt(j, {failure:'orphaned'}, j.lease_owner) (J11;
+  //   -> await killJobProcs(j) (§5.7); finishAttempt(j, {failure:'orphaned'}, j.lease_owner) (J11;
   //      J16/J17 if cancel_requested = 1)
   // pending approvals past expires_at -> 'expired' (decided_by='system') -> T5
 }
@@ -735,7 +740,7 @@ Reserving the full per-job cap (`jobs.budget_cap_usd`) covers `--max-budget-usd`
 
 - `backoff(n) = min(30 s × 2^(n−1), 10 min) × uniform(0.8, 1.2)`; `max_attempts = 3`.
 - Retries reuse the same job row (same `job_id`), so tool idempotency (§5.10) holds across attempts.
-- If `session_started = 1` the retry uses `--resume <session_id>` with the retry header (§6.3); otherwise `--session-id` with the fresh uuid the claim txn wrote to `jobs.session_id` (§5.3). Either way `jobs.session_id` is in the child's argv before it starts, which the kill paths rely on (§5.7, §5.9).
+- If `session_started = 1` the retry uses `--resume <session_id>` with the retry header (§6.3); otherwise `--session-id` with the fresh uuid the claim txn wrote to `jobs.session_id` (§5.3). Either way `jobs.session_id` is in the child's argv before it starts; only the fallback matcher uses it, when `pid` was never written (§5.7).
 - **Usage limit detection — UNVERIFIED.** The docs do not say how a 5-hour/weekly limit surfaces in `-p` output (ASSUMPTIONS.md §1). Heuristic: a non-success attempt whose `stderr`, last assistant text or `result` matches `/usage limit|rate limit|limit reached|resets? at/i` → J14. Fallback: 3 consecutive non-success attempts across all agents within 10 min with zero tool calls → same pause, reason `usage_limit` ("suspected"). Never retry-storm: J14 does not consume an attempt but pauses the whole scheduler for 30 min.
 
 ### 5.7 Crash recovery (boot, before any claim)
@@ -747,13 +752,7 @@ async function recoverOrphans() {
     // system_state.orchestrator_id (§5.9 step 5 (c)); every row here is the dead owner's, so kill_switch cannot drop to 0 here.
   const rows = db.all(`SELECT * FROM jobs WHERE status='running'`);
   for (const j of rows) {
-    // PID-reuse safe: the session UUID (written at claim, §5.3) is in the argv of the claude process we spawned.
-    // j.pid may be NULL (crash between claim and the post-spawn pid write), so also scan argv for the session id.
-    const pids = new Set(pidsByArgv(j.session_id));                     // lib/proc: ps scan
-    if (j.pid && isAlive(j.pid) && cmdline(j.pid).split(/\s+/).includes(j.session_id)) pids.add(j.pid);
-    for (const p of pids) killGroup(p, 'SIGTERM');
-    for (const p of pids) if (!(await waitDead(p, 5000))) killGroup(p, 'SIGKILL');
-    sweepByMarker(`--sb-job=${j.id}`);           // ps scan: MCP shims are started with this arg (§6.2)
+    await killJobProcs(j);                       // lib/proc, below: pgid + start time; argv fallback only if pid NULL
     finishAttempt(j, killOn ? { failure: 'orphaned', killedFor: 'kill' } : { failure: 'orphaned' }, j.lease_owner);
       // owned by the dead orchestrator's ME, not ours.
       // kill off: J11 (retryable, backoff), or J16/J17 if cancel_requested = 1.
@@ -766,7 +765,31 @@ async function recoverOrphans() {
   emit('orchestrator.recovered', { jobs: rows.length, kill: killOn });
 }
 ```
-`cmdline(pid)` uses `ps -o command= -p <pid>` (works on macOS and Linux). Matching semantics, defined once: `pidsByArgv`, `sweepByMarker` and `isOrchestrator` split `ps -axo pid=,command=` output on whitespace and compare **exact argv tokens**, never substrings: `sweepByMarker(m)` = some token equals `m` (so `--sb-job=1` does not hit `--sb-job=12`); `pidsByArgv(uuid)` = some token equals `uuid` AND some token's basename equals `basename(SLACKBOARD_CLAUDE_BIN)` (default `claude`); `isOrchestrator(pid)` = pid alive AND some token equals `--sb-orchestrator`. `killGroup(p, sig)` = `try { process.kill(-p, sig) } catch (ESRCH) { try { process.kill(p, sig) } catch {} }` (falls back to the pid when `p` is not a group leader); they, `isOrchestrator`, `sweepByMarker` and `ORCH_STALE_MS` live in `lib/proc` so the Next.js kill fallback (§5.9 step 1) uses the same verification. Tokens are in-memory plus hashes in the DB; after restart all hashes are cleared, so stray shims fail closed.
+**Process identity (`lib/proc`, defined once; used by the orchestrator and by the Next.js kill fallback, §5.9 step 1).**
+
+*Primary: process group + start time.* Children are spawned `detached`, so each `claude` is its own group leader (pgid = pid) and its MCP shim and grandchildren inherit the group. `procStart(pid)`: Linux = field 22 (`starttime`) of `/proc/<pid>/stat`, parsed after the last `)` (the `comm` field may contain spaces); macOS = `ps -ww -o lstart= -p <pid>` (1 s resolution; reuse of the same pid within the same second is an accepted residual). Returns `null` if the pid is dead. `isOurs(pid, start)` = `start != null && procStart(pid) === start`. `isOrchestrator(pid)` = `isOurs(pid, orchestrator_proc_start)` (both columns read in one SELECT). A live pid with a different start time is a reused pid: never signalled, never accepted as orchestrator. No command line is read on this path.
+
+*Fallback: positional argv, only when `jobs.pid IS NULL`* (crash between `spawn()` and the pid write, §6.2). `argv(pid)`: Linux = `/proc/<pid>/cmdline` split on `\0` (exact argv elements; the prompt is one element and is never scanned inside); macOS = `ps -axww -o pid=,args=` split on spaces, best effort. Enumeration: Linux `/proc/[0-9]*`, macOS that `ps` call.
+- `pidsByArgv(uuid)`: some `k` with `argv[k] ∈ {'--session-id','--resume'}` AND `argv[k+1] === uuid`, AND `basename(argv[0])` or `basename(argv[1])` equals `basename(SLACKBOARD_CLAUDE_BIN)` (default `claude`; `argv[1]` covers a `#!` script run as `/bin/sh <path>`). On macOS, where elements are not delimited, only the trailing pair counts: `k+1` must be the last element (§6.2 keeps `--session-id`/`--resume <uuid>` last), so text inside the prompt cannot form a match. Returns `[]` when doctor D7 marked the fallback disabled (`doctor_report.argv_fallback = false`, §6.4).
+- `sweepByMarker(jobId)`: `argv[1]` ends with `mcp-shim.js` AND `argv[2] === '--sb-job=' + jobId` (on macOS additionally exactly 3 elements). `--sb-job=1` never matches `--sb-job=12`; a `claude` whose prompt contains that string does not match (its `argv[1]` is not the shim).
+
+```ts
+function procTargets(j): number[] {              // group leaders to signal for one running row
+  if (j.pid != null) return isOurs(j.pid, j.proc_start) ? [j.pid] : [];  // primary (proc_start NULL: child exited before the write)
+  return pidsByArgv(j.session_id);                                       // fallback, pid never written
+}
+async function killJobProcs(j) {
+  const pids = procTargets(j);
+  for (const p of pids) killGroup(p, 'SIGTERM');
+  for (const p of pids) if (!(await waitDead(p, 5000))) killGroup(p, 'SIGKILL');
+  for (const p of sweepByMarker(j.id)) killGroup(p, 'SIGKILL');   // shim left behind if it escaped the group
+}
+```
+`killGroup(p, sig)` = `try { process.kill(-p, sig) } catch (ESRCH) { try { process.kill(p, sig) } catch {} }` (pid fallback for a shim pid that is not a group leader). `ORCH_STALE_MS` also lives in `lib/proc`.
+
+**UNVERIFIED: `claude` keeps its argv visible** (it may overwrite `process.title`, hiding `--session-id`). Only the fallback depends on it; the primary pgid + start-time identity does not. Doctor D7 (§6.4) checks it; if it fails, the fallback is disabled (doctor warns, does not fail): a pid-NULL row's shim is still swept by marker and its token revoked, so its tools fail closed, and that `claude` ends at its own `--max-turns`/`--max-budget-usd`.
+
+Tokens are in-memory plus hashes in the DB; after restart all hashes are cleared, so stray shims fail closed.
 
 ### 5.8 Chief of staff, MVP (deterministic)
 
@@ -780,11 +803,11 @@ The LLM chief of staff (§9.3) is Phase 2.
 
 ### 5.9 Kill switch
 
-1. UI `POST /api/kill` → txn `system_state.kill_switch = 1, kill_engaged_at = now`, event `kill.engaged`; then `POST /control/kill` to the orchestrator (1 s timeout). If it answers 2xx and `orchestrator_heartbeat_at` is ≤ `ORCH_STALE_MS` (15 s, `lib/proc`) old, the route returns `{ok, path: 'orchestrator'}` and step 2 runs (survivors arrive by event). Otherwise (unreachable, non-2xx, timeout, or heartbeat stale) children may still be alive, because they are spawned detached (§6.2) and outlive an orchestrator crash, so **Next.js kills directly** (`lib/proc/killVerified`, shared code, no orchestrator import): targets = for each `jobs` row `status='running'`, its `pid` if a token of `ps -o command= -p <pid>` equals its `session_id`, plus every pid from `pidsByArgv(session_id)` (§5.7; covers rows whose `pid` was never written, since `session_id` is written at claim, §5.3): `killGroup(pid,'SIGTERM')` (§5.7; ESRCH-safe), `killGroup(pid,'SIGKILL')` after 3 s; at 5 s re-run `pidsByArgv` for every running row's `session_id` and `sweepByMarker('--sb-job=<id>')` for each running row's job id, SIGKILL every match. Survivors = pids from that 5 s scan still alive after a further ≤ 1 s wait (so the route takes up to ~6 s); the route appends the step 2 follow-up event with `{survivors, path: 'direct'}` and returns `{ok, path: 'direct', survivors}`. Next.js changes no job or task row: they stay `running` until the orchestrator restarts and `recoverOrphans` finishes them as J15/T20 (§5.7). The route fails only if the txn fails (UX.md §9 "Kill failed").
-2. Orchestrator `killAll('kill')`: revoke every run token first (tool calls fail immediately), SIGTERM each process group, SIGKILL after 3 s, then at 5 s `sweepByMarker('--sb-job=<id>')` for each killed job id (not a blanket sweep) and a `pidsByArgv` scan for any `claude` whose argv has a known session id token → SIGKILL. Survivors (pid list, possibly empty) go in a `kill.engaged` follow-up event `{survivors, path: 'orchestrator'}`, always emitted; the UI banner shows "Stopped" only when the follow-up event (or the direct-path response) has `survivors = []` (UX.md §9).
+1. UI `POST /api/kill` → txn `system_state.kill_switch = 1, kill_engaged_at = now`, event `kill.engaged`; then `POST /control/kill` to the orchestrator (1 s timeout). If it answers 2xx and `orchestrator_heartbeat_at` is ≤ `ORCH_STALE_MS` (15 s, `lib/proc`) old, the route returns `{ok, path: 'orchestrator'}` and step 2 runs (survivors arrive by event). Otherwise (unreachable, non-2xx, timeout, or heartbeat stale) children may still be alive, because they are spawned detached (§6.2) and outlive an orchestrator crash, so **Next.js kills directly** (`lib/proc/killVerified`, shared code, no orchestrator import): targets = `procTargets(row)` for each `jobs` row `status='running'` (§5.7: its `pid` group iff `procStart(pid) = proc_start`; positional `pidsByArgv(session_id)` only for rows with `pid` NULL): `killGroup(pid,'SIGTERM')` (§5.7; ESRCH-safe), `killGroup(pid,'SIGKILL')` after 3 s; at 5 s re-run `procTargets` and `sweepByMarker(id)` for each running row, SIGKILL every match. Survivors = pids from that 5 s scan still alive after a further ≤ 1 s wait (so the route takes up to ~6 s); the route appends the step 2 follow-up event with `{survivors, path: 'direct'}` and returns `{ok, path: 'direct', survivors}`. Next.js changes no job or task row: they stay `running` until the orchestrator restarts and `recoverOrphans` finishes them as J15/T20 (§5.7). The route fails only if the txn fails (UX.md §9 "Kill failed").
+2. Orchestrator `killAll('kill')`: revoke every run token first (tool calls fail immediately), SIGTERM each process group, SIGKILL after 3 s, then at 5 s `sweepByMarker(id)` and `procTargets(row)` for each killed job (not a blanket sweep) → SIGKILL. Survivors (pid list, possibly empty) go in a `kill.engaged` follow-up event `{survivors, path: 'orchestrator'}`, always emitted; the UI banner shows "Stopped" only when the follow-up event (or the direct-path response) has `survivors = []` (UX.md §9).
 3. Jobs → `killed` (J15; on the direct path at the orchestrator's next boot, §5.7, which is why step 5 refuses Resume until then); their `work`/`review` tasks (`in_progress` or `in_review`) → `blocked/killed` (T20); "Retry all" (T16) sends each back to `in_review` + `review` or `todo` + `work` by `resumeTarget` (§3.1 round terms). Queued jobs stay queued and are not claimed until resume.
-4. Process-group assumption: `spawn(..., {detached: true})` makes `claude` a group leader; that `claude` keeps its MCP children in its group is **UNVERIFIED**. Fallback is the argv-marker sweep in step 2, which the e2e test S3 asserts.
-5. Resume: `POST /api/resume` (confirm) → first (outside the txn) compute `orchOk = isOrchestrator(orchestrator_pid)` (a `ps` call; read the pid beforehand), then in one `BEGIN IMMEDIATE` txn re-read the DB conditions: if `EXISTS (SELECT 1 FROM jobs WHERE status='running')` and NOT all of (a) `orchOk` (`isOrchestrator`, §5.7 `lib/proc`, same exact-token check as `killVerified`; if `orchestrator_pid` changed inside the txn, treat as false), (b) `orchestrator_heartbeat_at ≥ now - ORCH_STALE_MS`, (c) `NOT EXISTS (SELECT 1 FROM jobs WHERE status='running' AND lease_owner IS NOT (SELECT orchestrator_id FROM system_state WHERE id = 1))` → `409 kill_recovery_pending` (those rows would otherwise reach `recoverOrphans` with `kill_switch = 0` and be requeued, J11). (a) closes the window where a crashed orchestrator's heartbeat is still fresh (the residual window between the `ps` call and the txn, during which the orchestrator could die with a fresh heartbeat, is accepted: it is a few ms and the next `recoverOrphans` still finishes the rows); (c) keeps rows owned by a dead orchestrator's id blocking Resume until the new orchestrator's `recoverOrphans` finishes them. Else `kill_switch = 0`, event `kill.released`. UX.md §9.
+4. Process-group assumption: `spawn(..., {detached: true})` makes `claude` a group leader; that `claude` keeps its MCP children in its group is **UNVERIFIED**. Fallback is the positional shim-marker sweep (`sweepByMarker`, §5.7) in steps 1–2, which the e2e test S3 asserts.
+5. Resume: `POST /api/resume` (confirm) → first (outside the txn) compute `orchOk = isOrchestrator(orchestrator_pid)` (a `procStart` read; read pid and `orchestrator_proc_start` beforehand), then in one `BEGIN IMMEDIATE` txn re-read the DB conditions: if `EXISTS (SELECT 1 FROM jobs WHERE status='running')` and NOT all of (a) `orchOk` (`isOrchestrator`, §5.7 `lib/proc`, pid + start-time check; if `orchestrator_pid` or `orchestrator_proc_start` changed inside the txn, treat as false), (b) `orchestrator_heartbeat_at ≥ now - ORCH_STALE_MS`, (c) `NOT EXISTS (SELECT 1 FROM jobs WHERE status='running' AND lease_owner IS NOT (SELECT orchestrator_id FROM system_state WHERE id = 1))` → `409 kill_recovery_pending` (those rows would otherwise reach `recoverOrphans` with `kill_switch = 0` and be requeued, J11). (a) closes the window where a crashed orchestrator's heartbeat is still fresh (the residual window between the `procStart` read and the txn, during which the orchestrator could die with a fresh heartbeat, is accepted: it is a few ms and the next `recoverOrphans` still finishes the rows); (c) keeps rows owned by a dead orchestrator's id blocking Resume until the new orchestrator's `recoverOrphans` finishes them. Else `kill_switch = 0`, event `kill.released`. UX.md §9.
 
 ### 5.10 Idempotency of tool side effects
 
@@ -829,9 +852,10 @@ SLACKBOARD_CLAUDE_BIN (default: claude) \
   --strict-mcp-config --mcp-config ~/.slackboard/runs/<job_id>/mcp.json \
   --append-system-prompt "<contents of prompts/worker.md>" \
   --session-id <jobs.session_id>    # uuid-v4 written by the claim txn (§5.3); if session_started = 1: --resume <jobs.session_id>
+                                    # must stay the LAST argv pair (macOS fallback matcher, §5.7)
 ```
 
-- Spawn: `child_process.spawn(bin, args, { cwd, detached: true, stdio: ['ignore','pipe','pipe'], env })`; immediately after it returns, in its own txn: `UPDATE jobs SET pid = :child.pid WHERE id = :id AND status = 'running' AND lease_owner = :me`. A crash before that write leaves `pid` NULL; the kill paths then find the child by `session_id` in argv (§5.7, §5.9). The prompt is a single argv element (bundle capped at 24 KB, below Linux's 128 KiB per-argument limit).
+- Spawn: `child_process.spawn(bin, args, { cwd, detached: true, stdio: ['ignore','pipe','pipe'], env })`; immediately after it returns, in its own txn: `UPDATE jobs SET pid = :child.pid, proc_start = :procStart WHERE id = :id AND status = 'running' AND lease_owner = :me` (`procStart(child.pid)`, §5.7; NULL if the child already exited). A crash before that write leaves `pid` NULL; only then do the kill paths fall back to positional argv matching on `session_id` (§5.7, §5.9). The prompt is a single argv element (bundle capped at 24 KB, below Linux's 128 KiB per-argument limit).
 - `env` is an **allowlist**: `PATH, HOME, USER, LOGNAME, SHELL, LANG, LC_ALL, TMPDIR, TERM` plus `CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH=1` (confirmed to disable nested subagents, ASSUMPTIONS.md §3). `ANTHROPIC_API_KEY` and every other `ANTHROPIC_*` variable are never passed (they would switch to API billing). Never `--bare` (needs an API key). Never `--permission-mode bypassPermissions`; the flag is omitted entirely and `--permission-prompts none` denies anything not allowlisted (requires v2.1.259+; on v2.1.302+ `-p` is Manual by default anyway).
 - `mcp.json` (mode 0600, deleted at job end):
 ```json
@@ -884,10 +908,11 @@ Headers added for re-runs: retry — `<retry attempt="2">Your previous run was i
 | D4 allowlist | prompt "call add_note with task_id 0 and body 'probe', then stop": tool server receives the call (doctor mode, below); `permission_denials` empty | try alternate separator; else disabled |
 | D5 path scope | prompt "use Write to create /tmp/sb-probe-<rand>" (outside cwd): file absent and a denial recorded | worker Write/Edit fallback (§6.2 item 3) |
 | D6 no subagents | init `tools` lists neither `Task` nor `Agent`, or calls to them are denied | warn |
+| D7 process identity | spawn the real binary detached with a fresh `--session-id <uuid>` (last argv pair) and `-p "Reply OK" --max-turns 1`; `procStart(child.pid)` is non-null; polling every 50 ms until exit, positional `pidsByArgv(uuid)` (§5.7) returns `child.pid` at least once. Writes `doctor_report.argv_fallback = true/false` | `procStart` null: agents disabled; argv not found: warn, `argv_fallback = false` (fallback matcher disabled; primary pgid path unaffected) |
 
 **Doctor mode.** Probes have no `jobs` row. The orchestrator mints an in-memory doctor token per probe (never in the DB), role `doctor`, bound to the probe child's pid (checked against `X-SB-Parent-Pid` instead of `jobs.pid`), cwd a fresh `~/.slackboard/doctor/<rand>/`, `--max-budget-usd 0.05`. For a doctor token, `tools/list` returns the director-`respond` set (six tools, so D3 can check names); every `tools/call` except `add_note` returns `not_allowed_for_role`; `add_note` validates its input, records the call in memory for D4 and returns `{ok:true, note_id:0}` **without any DB write** (no task 0, no FK). The token is revoked when the probe exits. D5 adds `Write(./**)` to the probe's `--allowedTools`. Doctor runs before any claim; until it passes, nothing is claimed.
 
-`claude --version` is not in the confirmed flag list; doctor records it if available (UNVERIFIED) but decides only on behavioural probes D3–D6. Cost: three short runs.
+`claude --version` is not in the confirmed flag list; doctor records it if available (UNVERIFIED) but decides only on behavioural probes D3–D7. Cost: four short runs.
 
 ## 7. Parsing stream-json
 
@@ -895,7 +920,7 @@ Line-buffered on `\n`; each line `JSON.parse` in try/catch (unparsable lines are
 
 | `type` / `subtype` | Fields read | Action |
 |---|---|---|
-| `system` / `init` | `session_id`, `model`, `tools[]`, `mcp_servers[]` (`name`, `status`), `mcp_server_errors` | `session_started = 1`; `jobs.session_id` is already set at claim (§5.3) and is not overwritten (it is the argv value the kill paths match); a different init `session_id` is logged; require every expected Slackboard tool name in `tools` (authoritative check) and the `slackboard` server present with a connected status (exact status string UNVERIFIED; tool presence decides). Missing → kill, J13 |
+| `system` / `init` | `session_id`, `model`, `tools[]`, `mcp_servers[]` (`name`, `status`), `mcp_server_errors` | `session_started = 1`; `jobs.session_id` is already set at claim (§5.3) and is not overwritten (it is the argv value the pid-NULL fallback matcher uses, §5.7); a different init `session_id` is logged; require every expected Slackboard tool name in `tools` (authoritative check) and the `slackboard` server present with a connected status (exact status string UNVERIFIED; tool presence decides). Missing → kill, J13 |
 | `assistant` | `message.content[]`: `{type:'text', text}`, `{type:'tool_use', id, name, input}` | text → transcript only (agents speak through `post_message`, never through plain text); `tool_use` → `agents.presence_detail` (e.g. "Edit docs/INSTALL.md"), `job.output` event throttled to 1 per 2 s |
 | `user` | `message.content[]`: `{type:'tool_result', tool_use_id, is_error}` | transcript; count errors |
 | `system` / `permission_denied` | whole object (shape UNVERIFIED) | `permission_denials += 1`, log |
@@ -1116,7 +1141,7 @@ Rules
 | Tool allowlists | §6.1 | `--allowedTools`, `--disallowedTools`, `--strict-mcp-config`, and again per role in the tool server; `agents.allowed_tools` CHECK forbids Bash/Web |
 | Permission mode | `--permission-prompts none`; never `bypassPermissions`, never `--bare` | spawn builder; e2e asserts argv (§11) |
 | Untrusted content | escaped and fenced (§6.3); prompts (§9); authority from token + approvals only | renderer, tool server |
-| Kill switch | kills process groups + argv sweep, revokes tokens | §5.9 |
+| Kill switch | kills process groups verified by start time + positional shim-marker sweep, revokes tokens | §5.9 |
 | Billing safety | env allowlist strips `ANTHROPIC_*` | spawn builder; doctor D2 |
 | Planted config | delete CLAUDE.md/.claude/.mcp.json in cwd before spawn; git dir outside tree, hooks off | §4 |
 
