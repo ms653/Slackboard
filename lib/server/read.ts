@@ -16,13 +16,16 @@ function orchestratorStatus(s: any): 'up' | 'stale' | 'down' {
   return age > 5000 ? 'stale' : 'up';
 }
 
+export type Badge = { icon: string; text: string; retry?: { run_after: number; attempts: number; max_attempts: number } };
+const FAIL_TEXT: Record<string, string> = { timeout_idle: 'no output for 3 min', timeout_wall: 'time limit', orphaned: 'orchestrator restarted', error_during_execution: 'error' };
+
 /** Card lines derived once, server-side (UX §5). */
-function decorate(t: TaskRow, ny: Set<string>, extra: { threadStatus: string; capRaises: number; replies: number; cost: number; files: number; drift: boolean; hfailed: boolean; escalated: boolean; redo: boolean; badge: string | null }) {
+function decorate(t: TaskRow, ny: Set<string>, extra: { threadStatus: string; capRaises: number; replies: number; cost: number; files: number; drift: boolean; hfailed: boolean; escalated: boolean; redo: boolean; workerNote?: string | null; badge: Badge | null }) {
   let reason: string | null = null;
   if (t.status === 'blocked') {
     reason = ({ help: extra.escalated ? 'Blocked: waiting on you (help)' : 'Blocked: waiting on director (help)', review_cap: 'Blocked: you need to decide (review limit)',
       job_failed: extra.hfailed ? 'Blocked: director could not answer (help failed)' : extra.drift ? 'Blocked: workspace changed after review' : 'Blocked: failed 3 times',
-      killed: 'Blocked: stopped by kill switch', agent_blocked: 'Blocked by worker', user: 'Blocked: you cancelled the run' } as Record<string, string>)[t.blocked_reason!] ?? 'Blocked';
+      killed: 'Blocked: stopped by kill switch', agent_blocked: extra.workerNote ? `Blocked by worker: ${extra.workerNote}` : 'Blocked by worker', user: 'Blocked: you cancelled the run' } as Record<string, string>)[t.blocked_reason!] ?? 'Blocked';
   }
   let waiting: { text: string; action: 'reopen' | 'raise_cap' | 'cancel' } | null = null;
   if (['todo', 'in_progress', 'in_review'].includes(t.status) && extra.threadStatus !== 'open') {
@@ -42,7 +45,9 @@ export function bootstrap() {
   const s = d.prepare(`SELECT * FROM system_state WHERE id=1`).get() as any;
   const b = budgetNumbers(d);
   const g = globalBlock(d);
-  const lastKill = d.prepare(`SELECT payload FROM events WHERE type='kill.engaged' AND json_extract(payload,'$.followup')=1 ORDER BY id DESC LIMIT 1`).get() as { payload: string } | undefined;
+  const lastKill = s.kill_switch && s.kill_engaged_at
+    ? d.prepare(`SELECT payload FROM events WHERE type='kill.engaged' AND json_extract(payload,'$.followup')=1 AND ts>=? ORDER BY id DESC LIMIT 1`).get(s.kill_engaged_at) as { payload: string } | undefined
+    : undefined;
   const ny = d.prepare(`SELECT * FROM needs_you ORDER BY created_at`).all() as any[];
   const keys = new Set<string>();
   const items = ny.map((n) => {
@@ -74,20 +79,31 @@ export function bootstrap() {
     const escalated = !!d.prepare(`SELECT 1 FROM messages WHERE thread_id=? AND kind='help' AND EXISTS (SELECT 1 FROM json_each(mentions) WHERE value='user')`).get(t.thread_id);
     const redo = !!d.prepare(`SELECT 1 FROM artifacts WHERE task_id=? AND review_cycle=? AND review_round=? AND verdict='superseded'`).get(t.id, t.review_cycle, t.review_round + 1)
       && ['todo', 'in_progress'].includes(t.status);
-    const lastJob = d.prepare(`SELECT status, attempts, max_attempts, failure_kind, run_after FROM jobs WHERE task_id=? ORDER BY id DESC LIMIT 1`).get(t.id) as any;
-    let badge: string | null = null;
+    const lastJob = d.prepare(`SELECT status, attempts, max_attempts, failure_kind, run_after, exit_code, continuations FROM jobs WHERE task_id=? ORDER BY id DESC LIMIT 1`).get(t.id) as any;
+    let workerNote: string | null = null;
+    if (t.status === 'blocked' && t.blocked_reason === 'agent_blocked') {
+      const n = d.prepare(`SELECT body FROM notes WHERE task_id=? AND author_agent_id=? ORDER BY id DESC LIMIT 1`).get(t.id, t.assignee_agent_id) as { body: string } | undefined;
+      const line = n?.body.split('\n').map((x) => x.trim()).find((x) => x) ?? '';
+      workerNote = line ? (line.length > 80 ? line.slice(0, 79) + '…' : line) : null;
+    }
+    let badge: Badge | null = null;
     if (lastJob?.status === 'queued' && lastJob.attempts > 0 && lastJob.failure_kind) {
-      const secs = Math.max(0, Math.ceil((lastJob.run_after - now()) / 1000));
-      badge = `✕ Run failed (${lastJob.failure_kind}). Retrying in ${secs} s (${lastJob.attempts}/${lastJob.max_attempts})`;
+      const fk = lastJob.failure_kind as string;
+      if (lastJob.continuations === 1 && (fk === 'no_handoff' || fk === 'max_turns')) {
+        badge = { icon: '⟲', text: `Continuing (${fk === 'max_turns' ? 'turn limit' : 'no handoff'})` };
+      } else {
+        const why = fk === 'exit_nonzero' ? `exit ${lastJob.exit_code}` : FAIL_TEXT[fk] ?? fk;
+        badge = { icon: '✕', text: `Run failed (${why})`, retry: { run_after: lastJob.run_after, attempts: lastJob.attempts, max_attempts: lastJob.max_attempts } };
+      }
     } else if (s.kill_switch && orchestratorStatus(s) === 'down' && d.prepare(`SELECT 1 FROM jobs WHERE task_id=? AND status='running'`).get(t.id)) {
-      badge = '⏸ Stopped by kill, waiting for orchestrator';
+      badge = { icon: '⏸', text: 'Stopped by kill, waiting for orchestrator' };
     } else if (t.status === 'todo' && d.prepare(`SELECT 1 FROM events WHERE type='task.status_changed' AND entity_type='task' AND entity_id=? AND actor='system' AND ts>=?
         AND json_extract(payload,'$.from')='in_progress' AND json_extract(payload,'$.to')='todo'`).get(String(t.id), now() - 10_000)
       && !d.prepare(`SELECT 1 FROM jobs WHERE task_id=? AND failure_kind IS NOT NULL AND (finished_at>=? OR status='queued')`).get(t.id, now() - 10_000)) {
-      badge = '⟲ Claim expired, requeued';
+      badge = { icon: '⟲', text: 'Claim expired, requeued' };
     }
     return decorate(t, keys, { threadStatus: t.thread_status, capRaises: t.cap_raises, replies, cost, files: art ? JSON.parse(art.files).length : 0,
-      drift: lastFail?.failure_kind === 'workspace_drift', hfailed: helpFailed(d, t), escalated, redo, badge });
+      drift: lastFail?.failure_kind === 'workspace_drift', hfailed: helpFailed(d, t), escalated, redo, workerNote, badge });
   });
   const threads = d.prepare(`SELECT th.*, (SELECT id FROM tasks WHERE thread_id=th.id) AS task_id,
       (SELECT body FROM messages WHERE thread_id=th.id ORDER BY id LIMIT 1) AS first_body,
@@ -104,7 +120,7 @@ export function bootstrap() {
     system: { kill_switch: !!s.kill_switch, kill_engaged_at: s.kill_engaged_at, paused_until: s.paused_until, pause_reason: s.pause_reason,
       orchestrator: orchestratorStatus(s), heartbeat_at: s.orchestrator_heartbeat_at, doctor_ok_at: s.doctor_ok_at,
       doctor_report: s.doctor_report ? JSON.parse(s.doctor_report) : null, claude_version: s.claude_version, max_concurrency: s.max_concurrency,
-      blocked_by: g.blocked_by, last_kill: lastKill ? JSON.parse(lastKill.payload) : null, kill_pending_runs: runningKilledPending,
+      blocked_by: g.blocked_by, kill_followup: lastKill ? JSON.parse(lastKill.payload) : null, kill_pending_runs: runningKilledPending,
       api_key_detected: !!process.env.ANTHROPIC_API_KEY },
     usage: { spent_day: b.spent, jobs_day: b.jobsDay, jobs_5h: b.jobs5h, limit_usd_day: b.limitUsdDay, limit_jobs_day: b.limitJobsDay,
       limit_jobs_5h: b.limitJobs5h, reset_at: localMidnight() + 86_400_000 },

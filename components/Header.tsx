@@ -78,10 +78,11 @@ export function Header() {
   const s = boot.system, u = boot.usage;
   const orch = s.orchestrator as 'up' | 'stale' | 'down';
   const orchIcon = orch === 'up' ? '●' : orch === 'stale' ? '◔' : '✕';
-  const lk = s.last_kill;
+  const lk = s.kill_followup;
   const killStatus = s.kill_switch
     ? (s.kill_pending_runs > 0 ? `${s.kill_pending_runs} run${s.kill_pending_runs > 1 ? 's' : ''} not yet marked stopped`
-      : lk && lk.survivors?.length ? `${lk.survivors.length} processes may still be running (pid ${lk.survivors.join(', ')})` : 'Stopped')
+      : !lk ? 'Stopping…'
+      : lk.survivors?.length ? `${lk.survivors.length} processes may still be running (pid ${lk.survivors.join(', ')})` : 'Stopped')
     : null;
   const doctorFailed = s.doctor_report && !s.doctor_report.ok;
   return (

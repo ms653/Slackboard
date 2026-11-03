@@ -109,6 +109,10 @@ function TaskPane({ id }: { id: number }) {
     <p className="text-sm mb-3">Queued runs are cancelled and a running agent is stopped.</p>
     <div className="flex justify-end gap-2"><button className="btn bg-slate-700" onClick={() => setDlg(null)}>Keep</button>
       <ActionButton label="Cancel task" kind="danger" run={async () => { await post('cancel'); setDlg(null); toast(`T-${id} cancelled`); }} /></div></Dialog>);
+  const cancelJob = (j: any) => setDlg(<Dialog title="Cancel this job?" onClose={() => setDlg(null)}>
+    {j.status === 'running' && ['work', 'review'].includes(j.kind) && <p className="text-sm mb-3">T-{id} becomes Blocked: you cancelled the run</p>}
+    <div className="flex justify-end gap-2"><button className="btn bg-slate-700" data-autofocus onClick={() => setDlg(null)}>Keep</button>
+      <ActionButton label="Cancel job" kind="danger" run={async () => { await api(`/api/jobs/${j.id}`, { body: { action: 'cancel' } }); await refresh(); setDlg(null); }} /></div></Dialog>);
   const lastArt = data.artifacts.filter((a: any) => a.verdict !== 'superseded').slice(-1)[0];
   const actions: React.ReactNode[] = [];
   if (t.status === 'proposed' && data.approval?.status === 'pending') {
@@ -149,7 +153,7 @@ function TaskPane({ id }: { id: number }) {
               <td><span aria-hidden>{JOB_ICON[j.status]}</span> {j.status}{j.failure_kind ? ` (${j.failure_kind})` : ''}</td>
               <td>{j.status === 'running' ? `cap ${usd(j.budget_cap_usd)}` : `${usd(j.cost_usd)} est.`}</td>
               <td className="text-right space-x-1">
-                {['queued', 'running'].includes(j.status) && <ActionButton label="Cancel job" run={async () => { await api(`/api/jobs/${j.id}`, { body: { action: 'cancel' } }); await refresh(); }} />}
+                {['queued', 'running'].includes(j.status) && <ActionButton label="Cancel job" run={async () => cancelJob(j)} />}
                 {j.status === 'queued' && j.attempts > 0 && <ActionButton label="Retry now" run={async () => { await api(`/api/jobs/${j.id}`, { body: { action: 'retry_now' } }); await refresh(); }} />}
                 {j.attempts > 0 && <button className="underline" onClick={() => open({ kind: 'log', id: j.id })}>Open log</button>}
               </td></tr>))}</tbody></table></div>

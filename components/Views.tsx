@@ -71,7 +71,7 @@ export function TaskCard({ t, now }: { t: any; now: number }) {
       {t.reason && <div className="text-xs text-rose-200"><span aria-hidden>⏸</span> {t.reason}</div>}
       {t.waiting && <div className="text-xs text-amber-200"><span aria-hidden>⏸</span> {t.waiting.text}</div>}
       {t.done && <div className="text-xs text-emerald-200"><span aria-hidden>✓</span> {t.done}</div>}
-      {t.badge && <div className="text-xs text-amber-200"><span aria-hidden>{t.badge.slice(0, 1)}</span> {t.badge.slice(2)}</div>}
+      {t.badge && <div className="text-xs text-amber-200"><span aria-hidden>{t.badge.icon}</span> {t.badge.text}{t.badge.retry && `. Retrying in ${Math.max(0, Math.ceil((t.badge.retry.run_after - now) / 1000))} s (${t.badge.retry.attempts}/${t.badge.retry.max_attempts})`}</div>}
       {t.flag && <div className="text-xs font-semibold text-amber-300"><span aria-hidden>⚑</span> {t.flag}</div>}
       {moves.length > 0 && <button className="text-xs underline mt-1" aria-haspopup="menu" onClick={(e) => { e.stopPropagation(); setMenu((m) => !m); }}>Move… <kbd>m</kbd></button>}
       {menu && <ul role="menu" className="mt-1 bg-slate-900 border border-slate-600 rounded" onClick={(e) => e.stopPropagation()}>
