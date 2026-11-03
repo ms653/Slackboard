@@ -54,7 +54,7 @@ export function classify(db: DB, j: JobRow, o: Outcome, killOn: boolean): Classi
   const subtype = o.result?.subtype ? (SUBTYPES.includes(o.result.subtype) ? o.result.subtype : 'error_during_execution') : null;
   const success = subtype === 'success' && o.exitCode === 0 && !killedFor && !o.failure;
   if (killOn && !killedFor && !success) killedFor = 'kill';
-  if (killedFor === 'kill' || killedFor === 'shutdown') return { rule: 'J15', status: 'killed', failure: 'killed' };
+  if (killedFor === 'kill') return { rule: 'J15', status: 'killed', failure: 'killed' };
   if (killedFor === 'cancelled') {
     const t = j.task_id ? getTask(db, j.task_id) : undefined;
     return { rule: t?.status === 'cancelled' ? 'J16' : 'J17', status: 'cancelled', failure: 'cancelled' };
@@ -82,7 +82,7 @@ export function classify(db: DB, j: JobRow, o: Outcome, killOn: boolean): Classi
   }
   if (subtype === 'error_max_turns') return j.continuations === 0 ? asRequeue('J8', 'max_turns') : { rule: 'J9', status: 'failed', failure: 'max_turns' };
   if (subtype === 'error_max_budget_usd') return { rule: 'J10', status: 'failed', failure: 'max_budget' };
-  const failure = killedFor ?? o.failure ?? (subtype === 'error_during_execution' ? 'error_during_execution'
+  const failure = (killedFor === 'shutdown' ? 'orphaned' : killedFor) ?? o.failure ?? (subtype === 'error_during_execution' ? 'error_during_execution'
     : (o.exitCode ?? 0) !== 0 ? 'exit_nonzero' : 'no_result');
   return j.attempts < j.max_attempts ? asRequeue('J11', failure) : { rule: 'J12', status: 'failed', failure };
 }

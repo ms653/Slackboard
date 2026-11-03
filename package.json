@@ -11,7 +11,8 @@
     "orchestrator": "node dist/orchestrator/main.js",
     "doctor": "node dist/orchestrator/main.js --doctor-only",
     "test": "vitest run",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test:e2e": "npm run build:orch && vitest run -c vitest.e2e.config.ts"
   },
   "dependencies": {
     "better-sqlite3": "^11.7.0",
