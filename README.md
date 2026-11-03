@@ -57,7 +57,7 @@ Send "Please write INSTALL.md" in #general, approve the proposal in **Needs you*
 
 ```bash
 npm test             # unit: DDL/triggers, claim gates, task + job state machines, review loop with real git
-npm run test:e2e     # end-to-end with the real orchestrator + fake claude: PRD S1 (P1–P7), S2, S3, S3b, S5
+npm run test:e2e     # end-to-end with the real orchestrator + fake claude: PRD S1 (P1–P8), S2, S3, S3b, S5
 ```
 
 ## Data

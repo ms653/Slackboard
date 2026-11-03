@@ -48,39 +48,6 @@ describe('S1 (P1-P8): request -> proposal -> approval -> work -> review (1 rewor
     expect(env.one(`SELECT count(*) n FROM messages m WHERE m.kind='help' AND EXISTS (SELECT 1 FROM json_each(m.mentions) WHERE value='user')`).n).toBe(0);
     // P4: total jobs (no status filter) <= 6
     expect(env.one(`SELECT count(*) n FROM jobs`).n).toBeLessThanOrEqual(6);
-    // P5: injected failure in the director respond job, attempt 1: post, then crash before create_task.
-      'director:respond:a1': [{ tool: { name: 'post_message', input: { body: 'On it: proposing a task.' } } }, { exit: 1 }],
-      'director:respond:a2': [{ tool: { name: 'post_message', input: { body: 'On it: proposing a task.' } } },
-        { tool: { name: 'create_task', input: { title: 'Write INSTALL.md', description: 'Install guide', acceptance: '1. INSTALL.md exists', why: 'You asked.' } } }],
-      'worker:work': [{ write: { path: 'INSTALL.md', content: '# Install\n\nround {{round}}\n' } },
-        { tool: { name: 'update_task', input: { task_id: '{{task_id}}', action: 'submit_for_review', note: 'done' } } }],
-      'director:review:r1': [{ tool: { name: 'update_task', input: { task_id: '{{task_id}}', action: 'request_changes', note: '1. add prerequisites' } } }],
-      'director:review:r2': [{ tool: { name: 'update_task', input: { task_id: '{{task_id}}', action: 'approve' } } },
-        { tool: { name: 'post_message', input: { body: 'T is done and reviewed.', mentions: ['user'] } } }],
-    });
-    env.start();
-    await env.until(() => env.one(`SELECT doctor_ok_at FROM system_state`).doctor_ok_at, 30000, 'doctor');
-    const th = env.tx(() => createThread(env.db, 'general chat', { kind: 'user' }));
-    env.tx(() => postUserMessage(env.db, th, 'Please write INSTALL.md for the project.'));
-    const ap = await env.until(() => env.one(`SELECT * FROM approvals WHERE status='pending'`), 30000, 'approval');
-    // no worker job may start before the approval is decided
-    expect(env.one(`SELECT count(*) n FROM events WHERE type='job.started' AND json_extract(payload,'$.agent')='worker'`).n).toBe(0);
-    env.tx(() => decideApproval(env.db, ap.id, 'approved'));
-    const task = await env.until(() => env.one(`SELECT * FROM tasks WHERE id=? AND status='done'`, ap.task_id), 60000, 'task done');
-
-    // P1: proposed then the exact status path
-    const created = env.one(`SELECT json_extract(payload,'$.status') s FROM events WHERE type='task.created' AND entity_id=?`, String(task.id)).s;
-    const path = env.q(`SELECT json_extract(payload,'$.to') t FROM events WHERE type='task.status_changed' AND entity_id=? ORDER BY id`, String(task.id)).map((r) => r.t);
-    expect([created, ...path]).toEqual(['proposed', 'todo', 'in_progress', 'in_review', 'todo', 'in_progress', 'in_review', 'done']);
-    // P2: first worker start after approval
-    const firstWorker = env.one(`SELECT min(ts) t FROM events WHERE type='job.started' AND json_extract(payload,'$.agent')='worker'`).t;
-    expect(firstWorker).toBeGreaterThanOrEqual(approvedAt - 50);
-    // P3: needs-you items = 1 approval + 1 ready; no blocked; no help to user
-    const p3 = env.one(`SELECT count(*) n FROM events WHERE type='approval.requested'`).n + env.q(`SELECT 1 FROM events WHERE type='task.status_changed' AND json_extract(payload,'$.to')='done'`).length;
-    expect(p3).toBe(2);
-    expect(env.one(`SELECT count(*) n FROM events WHERE type='task.status_changed' AND json_extract(payload,'$.to')='blocked'`).n).toBe(0);
-    // P4: job count (respond counted once; 2 work + 2 review + respond) <= 6
-    expect(env.one(`SELECT count(*) n FROM jobs WHERE status NOT IN ('cancelled')`).n).toBeLessThanOrEqual(6);
     // P5: retry produced no duplicate message; exactly one replay
     expect(env.one(`SELECT count(*) n FROM messages WHERE body='On it: proposing a task.'`).n).toBe(1);
     expect(env.one(`SELECT count(*) n FROM events WHERE type='tool.called' AND json_extract(payload,'$.replay')=1`).n).toBe(1);
