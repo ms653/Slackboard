@@ -551,7 +551,7 @@ These need no logic change. `killAll` already covers every child, `procTargets` 
 | `POST /api/tasks/:id` adds `{action:'reassign', assignee}` and `{action:'reroute_help'}` | R1; T11c |
 | `GET /api/artifacts/:id` | adds `comments` (anchored notes, oldest first, each with `delivery: {state:'pending'\|'sent'\|'closed', job_id?}` derived from `job.started.review_note_ids` and §B4 rules) and `siblings` (non-superseded artifacts of the task: id, cycle, round, head) |
 | `GET /api/artifacts/:id/compare?from=<artifactId>` | both artifacts must belong to the same task (`400 wrong_task`). Runs `git diff --no-color <from.head_commit> <this.head_commit>` (TECH §4 git wrapper, read-only) outside any txn. Output is capped at 2,000 lines (`truncated`) and is not cached. Missing object → `409 compare_unavailable` |
-| `POST /api/artifacts/:id/comments` `{path, line, side, body}` | user comment: task not `cancelled`, `line_not_in_diff` check (§T6.4), `INSERT notes(author_agent_id NULL, …)`, `note.added`; no job enqueued |
+| `POST /api/artifacts/:id/comments` `{path, line, side, body}` | user comment, one IMMEDIATE txn: artifact is the task's latest non-superseded artifact and task status ∈ {`in_review`,`blocked`,`todo`}, else `409 comments_closed` (hint names the reason); `line_not_in_diff` check (§T6.4), `INSERT notes(author_agent_id NULL, …)`, `note.added`; no job enqueued |
 
 `GET /api/bootstrap.agents` adds `retired_at`, `skill_note`, `queue_reason`, `budget {spent, limit_usd, started, limit_jobs}`, and the help job's asker for presence text.
 
@@ -566,17 +566,19 @@ Enums marked *generated* are built per job in `/tools` (the shim fetches them on
     "name":       {"type":"string","pattern":"^[a-z][a-z0-9_]{1,23}$"},
     "skill_note": {"type":"string","minLength":1,"maxLength":500,"description":"What this worker is for; shown to the user and in every prompt."},
     "why":        {"type":"string","minLength":1,"maxLength":500},
-    "daily_usd":  {"type":"number","minimum":0.1,"maximum":2.0,"default":1.0},
+    "daily_usd":  {"type":"number","minimum":1.0,"maximum":3.0,"default":2.0,"description":"≥ worker work cap 1.00 (§T5.1)"},
     "daily_jobs": {"type":"integer","minimum":1,"maximum":20,"default":10} } }
 ```
 - **Auth:** role `director`, kind `respond`, else `not_allowed_for_role`.
 - **Guards, in order:**
+  0. `daily_usd < 1.00` → `allowance_below_job_cap` (checked before generic schema `minimum` so the code is specific; hint "one work run reserves $1.00");
   1. one ok call per job (`validation_error`);
   2. name reserved or taken → `name_taken`;
-  3. a pending spawn approval exists → `spawn_pending` (index `approvals_one_pending_spawn`);
+  3. a pending spawn approval exists → `spawn_pending` (index `approvals_one_pending_spawn`; a UNIQUE violation on that index from a race is also mapped to `spawn_pending`, never `internal_error`);
   4. active workers ≥ 3 → `worker_cap`, hint "assign to an existing worker or ask the user to retire one".
 - **Side effects:** A1, with payload `{action:'spawn_worker', name, skill_note, model:'sonnet', daily_usd, daily_jobs}` and `summary` = `why`.
 - **Returns** `{ok, approval_id, status:'pending'}`. Nothing runs until the user approves.
+- **Only route:** `request_approval` (TECH §8) rejects any `payload` whose `action` is `'spawn_worker'` with `validation_error`, hint "use spawn_worker". A2 re-validates the stored payload anyway (§T2).
 
 ### T6.2 `create_task` (changed)
 `assignee: {"enum": <generated>}`. If omitted, the server picks by the fewest-open rule (T1). A non-member value → `unknown_assignee`, hint lists the current ids. Everything else is as TECH §8.2.
@@ -641,9 +643,10 @@ Event `help.requested {routed_to, task_id, options, peer}`. Returns `{ok, messag
 |---|---|---|
 | Active workers | ≤ 3 | trigger `agents_worker_cap`; `spawn_worker` guard; A2/A4 |
 | Spawn requests | 1 per job; 1 pending at a time | tool server; index `approvals_one_pending_spawn` |
-| Spawn needs the user | approval `spend`, consumed in the same txn as the insert | trigger `agents_spawn_gate`; only `decideApproval` inserts spawned agents (unit test: no `INSERT INTO agents` reachable from `lib/domain/tools.ts`) |
+| Spawn needs the user | approval `spend`, consumed in the same txn as the insert; only via `spawn_worker` | trigger `agents_spawn_gate`; only `decideApproval` inserts spawned agents (unit test: no `INSERT INTO agents` reachable from `lib/domain/tools.ts`); `request_approval` refuses `action:'spawn_worker'`; A2 re-validates the payload |
 | Director slot | workers hold ≤ `max_concurrency − 1` running slots | claim SQL |
-| Per-agent spend | daily est. USD + runs per spawned worker | claim SQL `@agentRoom` |
+| Per-agent spend | daily est. USD (1.00–3.00, never below the work cap) + runs per spawned worker | claim SQL `@agentRoom`; `allowance_below_job_cap` at every writer |
+| Stuck peer help | reroute to director after 10 min queued or peer disabled; user can reroute any time | T11c sweep and route |
 | Peer help volume | 2 per task, 3 per ordered pair / 24 h, 1 handoff per job | `request_help` guards |
 | No worker loops | (1) peers can't ask peers (no chains); (2) only a `help` job's single `wake` to the asker can wake a worker, and only while `help_agent_id = caller`; (3) acks never wake (no `wake` → no job); (4) a failed peer help retries on the director, never the peer; (5) all thread caps (TECH §3.3) still bound every thread | tool server, `finishAttempt`, `resumeTarget` case 0 |
 | Peer can't change the asker's work | peer `help` has no Write/Edit; the asker's work job has ended before the peer runs (T11 enqueues at job end) | `kindSettings`, T11 ordering |
@@ -666,7 +669,8 @@ Event `help.requested {routed_to, task_id, options, peer}`. Returns `{ok, messag
 - **Migration:**
   - fresh DB → `user_version = 2`;
   - a v1 DB with rows in every table (incl. 3 `tool_calls`) → v2 with the same `tool_calls` rows, `PRAGMA foreign_key_check` empty, `journal_mode = wal`, `foreign_keys = 1`;
-  - running `migrate()` twice is a no-op.
+  - running `migrate()` twice is a no-op;
+  - `test/migrations/validate_v2.py` (§T1) runs against the DDL block in this doc; CI/release runs it with `python3 -I test/migrations/validate_v2.py <repo>` and requires `OK: migration 2 validated`.
 - **Triggers:**
   - 4th active worker → `worker_cap`, while a 4th after retiring one is ok;
   - spawned insert with a pending, rejected or mismatched-name/skill approval → `approval_required`;
@@ -674,22 +678,28 @@ Event `help.requested {routed_to, task_id, options, peer}`. Returns `{ok, messag
   - task insert or reassign to a retired agent or the director → `assignee_not_active_worker`;
   - `help_agent_id` set on a `todo` task → `help_agent_outside_help`;
   - anchored note: missing field → `anchor_incomplete`; path not in `artifacts.files` or an artifact of another task → `anchor_not_in_artifact`; any notes UPDATE → `notes_immutable`;
-  - second pending spawn → UNIQUE violation;
+  - second pending spawn → UNIQUE violation (and the tool layer maps it to `spawn_pending`);
   - `tool_calls.tool = 'spawn_worker'` accepted, `'foo'` rejected.
 - **A2 txn:**
   - approve creates agent, budget row and consumed approval together;
   - a `budgets` insert that fails (forced) rolls back the agent too, and the approval stays pending;
   - `raise_concurrency_to = 5` → 400 with nothing changed;
-  - approve at the cap → `409 worker_cap`, approval still pending.
+  - approve at the cap → `409 worker_cap`, approval still pending;
+  - a stored payload with `daily_usd = 0.5` or `model = 'opus'` (inserted directly) → `400 invalid_payload`, nothing created, approval still pending;
+  - approve enqueues exactly one director `respond` job in the approval's thread; reject/expire enqueue none.
+- **Retire (A6):** open task plus a queued `respond` job → `409 agent_has_open_tasks` and the queued job is still `queued`; running job → `agent_busy`, nothing cancelled; ok path cancels queued jobs and retires in one txn.
 - **Claim:**
   - (i) with `max_concurrency = 3`, 3 queued worker jobs on 3 workers plus a queued director job → 2 workers and the director run;
   - (ii) `max_concurrency = 1` → a worker job may run;
-  - (iii) `@agentRoom` excludes an agent over its USD or job limit while others still claim, and `queueReason` returns `agent budget`;
+  - (iii) `@agentRoom` excludes an agent over its USD or job limit while others still claim, and `queueReason` returns `agent budget`; boundary: `limit_usd = 1.00` with 0 spent → a work job (cap 1.00) is claimed; after 0.01 spent → not claimed, while a peer `help` (cap 0.30) still is;
+  - (iii-b) minimum allowance: `limit_usd` 0.99 rejected `allowance_below_job_cap` by `spawn_worker`, `POST /api/agents` and `PUT /api/budgets`; 1.00 accepted;
+  - (iii-c) `queueReason` order (§T5.1), incl. `busy (running T-n)`;
   - (iv) retired agent's queued job is never claimed;
   - (v) peer help job with `help_agent_id` ≠ its agent is not claimed and is cancelled by J4;
   - (vi) the 1,000-race test from TECH §11 rerun with 3 workers never shows two running jobs per agent.
 - **Tools:**
   - `spawn_worker`: auth matrix (worker, director `review`/`help` → `not_allowed_for_role`), guards in order, replay idempotent (same input → same approval id);
+  - `request_approval {kind:'spend', payload:{action:'spawn_worker', …}}` → `validation_error`, no approval row;
   - `create_task` enum generated in `/tools`, `unknown_assignee` after retire, fewest-open default;
   - `post_message` wake matrix (§T6.3), incl. a peer wake on a non-blocked task → message, zero jobs;
   - `request_help` routing matrix (§T6.5), both caps, chain refusal;
@@ -698,6 +708,8 @@ Event `help.requested {routed_to, task_id, options, peer}`. Returns `{ok, messag
   - T11 to a peer → `help_agent_id`, one peer help job queued; T11b; T16 by peer wake; T16 by director wake while the peer help job is queued → that job cancelled, no help-end;
   - help-end for a peer on J12, J10, J15, J4 and `no_handoff` → `blocked/job_failed`, `helpFailed`, Retry → director `help` with `help_agent_id = 'director'`;
   - user reply → `todo` + `work`;
+  - T11c: peer help job queued ≥ 10 min (clock advanced) → `help_agent_id = 'director'`, peer job `cancelled`, no help-end, one director `help` job; peer disabled → same on the next sweep; user `reroute_help` → same immediately; peer job `running` → `409 help_running`; kill engaged → sweep does nothing;
+  - comment delivery: user comment while `todo` → in the next work job's `job.started.review_note_ids`; comment route while `in_progress`, on an older artifact, or on `done` → `409 comments_closed`; delivery state `closed` after `done` without a work run;
   - R1 reassign moves the queued `work` job; reassign of an approved agent top-level task → `approved_task_immutable`.
 - **Prompt renderer:**
   - `<team>` escaping;
@@ -709,6 +721,7 @@ Event `help.requested {routed_to, task_id, options, peer}`. Returns `{ok, messag
   - `parseUnifiedDiff` fixtures (add-only, delete-only, rename, binary, no-newline, multiple hunks);
   - `sideBySide` pairing and padding;
   - `splitHighlightedLines` keeps spans balanced on a multi-line block comment;
+  - XSS fixture: a diff line `<img src=x onerror=alert(1)>` and `</span><script>` in a `.html` and an unknown-extension file render as text (no element created) in both modes;
   - compare route: R1→R2 output equals `git diff`, cross-task → `400`, a garbage head → `409 compare_unavailable`.
 
 **Fake binary (`test/fake-claude/claude`) changes:**
@@ -719,13 +732,16 @@ Event `help.requested {routed_to, task_id, options, peer}`. Returns `{ok, messag
 
 The argv and env assertions are unchanged and also run for help jobs. They add one assertion: a worker `help` job's `--allowedTools` contains no `Write`/`Edit`.
 
-**E2E (Playwright against `npm start`, fake binary, temp `SLACKBOARD_HOME`):** P2-S1 … P2-S9 exactly as in §A6, asserted from the DB and the UI. Plus:
+**E2E (Playwright against `npm start`, fake binary, temp `SLACKBOARD_HOME`):** P2-S1 … P2-S11 exactly as in §A6, asserted from the DB and the UI. Plus:
+- expand/collapse with `x` and `Esc` moves focus to the review heading / back to Expand; at a 1000 px window side by side shows "needs Expand", at 800 px "needs a window at least 900 px wide";
+- Cancel of an agent-created task with "ask the director to re-propose" prefills the #general composer and sends nothing;
 - the agents list renders 3 workers with distinct presences and queue reasons;
 - the spawn card checkbox raises `max_concurrency`, and the `settings.changed` event is present;
 - axe passes on the agents list, the spawn card and the diff view (both modes, with comments open);
 - keyboard-only run: open the diff with `d`, `n` ×2, `c`, type, `Ctrl+Enter`, `v`, `Esc`, with the assertion that focus returns to the invoking element each time.
 
 **Manual real-binary smoke (release gate, extends TECH §11):**
+- migration validator green: `python3 -I test/migrations/validate_v2.py /home/user/Slackboard` prints `OK: migration 2 validated` against the final DDL block;
 - `npm run doctor` passes with 7 director tools;
 - P2-S1 with the real `claude` (bounds: ≤ 25 min, ≤ $5.00 est., zero unexpected `permission_denials`);
 - P2-S6 with a real peer answer;
