@@ -111,6 +111,7 @@ async function sweep(): Promise<void> {
 }
 
 async function killAll(why: 'kill' | 'shutdown'): Promise<number[]> {
+  killDoctorProbes();
   const list = [...children.values()];
   tokens.revokeAll();
   for (const c of list) {
@@ -167,7 +168,7 @@ async function boot(): Promise<void> {
   if (!control) { control = randomToken(); fs.writeFileSync(paths.controlToken(), control, { mode: 0o600 }); }
   const server = await startToolServer({ db, tokens, controlToken: control, onControl: async (p, body) => {
     if (p === 'wake') { setImmediate(tick); return {}; }
-    if (p === 'kill') { killAll('kill').catch((e) => log('killAll error', e?.message)); return { accepted: true }; }   // survivors arrive in the kill.engaged follow-up event
+    if (p === 'kill') { if (!killing) { killing = true; killAll('kill').catch((e) => log('killAll error', e?.message)).finally(() => { killing = false; }); } return { accepted: true }; }   // survivors arrive in the kill.engaged follow-up event
     if (p === 'cancel') { const c = children.get(Number(body.job_id)); if (c) killChild(c, 'cancelled', tokens); return {}; }
     if (p === 'doctor') { doctor(true); return { started: true }; }
     return { ok: false };

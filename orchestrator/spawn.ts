@@ -139,7 +139,7 @@ export function spawnJob(ctx: SpawnCtx, j: JobRow, token: string): void {
     const r = c.state.result;
     const usage = r?.subtype !== 'success' && (USAGE_LIMIT_RE.test(c.stderrTail) || USAGE_LIMIT_RE.test(c.state.lastText) || USAGE_LIMIT_RE.test(r?.result ?? ''));
     finish(ctx, j.id, { exitCode: code, signal, result: r ?? null, killedFor: c.killedFor ?? null, failure: c.failure ?? null,
-      sawUsageLimit: usage, permissionDenials: c.state.permissionDenials, error: (c.stderrTail || '').slice(-1000) || null });
+      initSeen: !!c.state.init, sawUsageLimit: usage, permissionDenials: c.state.permissionDenials, error: (c.stderrTail || '').slice(-1000) || null });
     try { killGroup(pid, 'SIGKILL'); } catch {}                         // leftovers in the group
   });
 }

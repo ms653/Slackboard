@@ -11,7 +11,7 @@ export interface Outcome {
   result?: { subtype?: string; total_cost_usd?: number; num_turns?: number } | null;
   killedFor?: 'kill' | 'cancelled' | 'timeout_wall' | 'timeout_idle' | 'lease_lost' | 'shutdown' | null;
   failure?: 'orphaned' | 'spawn_error' | 'mcp_not_connected' | 'tools_missing' | 'workspace_drift' | null;
-  sawUsageLimit?: boolean; permissionDenials?: number; error?: string | null;
+  initSeen?: boolean; sawUsageLimit?: boolean; permissionDenials?: number; error?: string | null;
 }
 export type Classified = { rule: string; status: 'succeeded' | 'failed' | 'cancelled' | 'killed' | 'queued'; failure: string | null };
 
@@ -94,7 +94,9 @@ export function finishAttempt(db: DB, jobId: number, o: Outcome, expectedOwner: 
   const ss = db.prepare(`SELECT kill_switch, pause_reason FROM system_state WHERE id=1`).get() as { kill_switch: number; pause_reason: string | null };
   const c = classify(db, j, o, ss.kill_switch === 1);
   const t = now();
-  const estimated = !o.result && j.pid != null && o.failure !== 'spawn_error' && o.failure !== 'workspace_drift';   // estimate from the cap only if a process actually started
+  const pastInit = o.initSeen !== undefined ? o.initSeen : j.session_started === 1 && (j.last_output_at ?? 0) > (j.started_at ?? 0);
+  const estimated = !o.result && j.pid != null && pastInit && o.failure !== 'spawn_error' && o.failure !== 'workspace_drift'
+    && o.failure !== 'tools_missing' && o.failure !== 'mcp_not_connected';   // estimate from the cap only if a process actually started
   const cost = o.result ? o.result.total_cost_usd ?? 0 : estimated ? j.budget_reserved_usd ?? 0 : 0;
   const subtype = o.result?.subtype ? (SUBTYPES.includes(o.result.subtype) ? o.result.subtype : 'error_during_execution') : null;
   db.prepare(`UPDATE jobs SET cost_usd = cost_usd + ?, num_turns = ?, result_subtype = ?, exit_code = ?, error = ?,

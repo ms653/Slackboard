@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import http from 'node:http';
+import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { tx } from '@/lib/db';
 import { freshEnv, claim, userTask, job, ME } from './helpers';
@@ -13,7 +14,7 @@ describe('F1 budget estimate', () => {
     userTask(db);
     const w = claim(db)!;
     expect(w.budget_reserved_usd).toBe(1.0);
-    db.prepare(`UPDATE jobs SET pid=4242 WHERE id=?`).run(w.id);
+    db.prepare(`UPDATE jobs SET pid=4242, session_started=1, started_at=1000, last_output_at=2000 WHERE id=?`).run(w.id);
     tx(db, () => finishAttempt(db, w.id, { failure: 'orphaned' }, ME));
     expect(job(db, w.id).cost_usd).toBe(1.0);
     const ev = db.prepare(`SELECT payload FROM events WHERE type='job.attempt_finished' AND entity_id=?`).get(String(w.id)) as any;
@@ -42,8 +43,35 @@ describe('ENG-F1 no phantom spend', () => {
     const db = freshEnv(); userTask(db);
     const w = claim(db)!;
     db.prepare(`UPDATE jobs SET pid=4242 WHERE id=?`).run(w.id);
-    tx(db, () => finishAttempt(db, w.id, { killedFor: 'timeout_wall' }, ME));
+    tx(db, () => finishAttempt(db, w.id, { killedFor: 'timeout_wall', initSeen: true }, ME));
     expect(job(db, w.id).cost_usd).toBe(1.0);
+  });
+});
+
+describe('ENG-F2 estimate only past init', () => {
+  const run = (o: any, pre = '') => {
+    const db = freshEnv(); userTask(db);
+    const w = claim(db)!;
+    db.prepare(`UPDATE jobs SET pid=4242${pre} WHERE id=?`).run(w.id);
+    tx(db, () => finishAttempt(db, w.id, o, ME));
+    return job(db, w.id).cost_usd;
+  };
+  it('exit 1 with pid and no init charges 0', () => expect(run({ exitCode: 1, initSeen: false })).toBe(0));
+  it('tools_missing charges 0', () => expect(run({ failure: 'tools_missing', initSeen: true })).toBe(0));
+  it('mcp_not_connected charges 0', () => expect(run({ failure: 'mcp_not_connected', initSeen: true })).toBe(0));
+  it('killed after init charges the cap', () => expect(run({ killedFor: 'timeout_wall', initSeen: true })).toBe(1.0));
+  it('orphan with session_started and output charges the cap', () =>
+    expect(run({ failure: 'orphaned' }, ', session_started=1, started_at=1000, last_output_at=2000')).toBe(1.0));
+  it('orphan with session_started=0 charges 0', () =>
+    expect(run({ failure: 'orphaned' }, ', session_started=0, started_at=1000, last_output_at=2000')).toBe(0));
+});
+
+describe('ENG-F3 doctor stop flag', () => {
+  it('probe spawns nothing after killDoctorProbes()', async () => {
+    const { probe, killDoctorProbes, liveProbePids } = await import('@/orchestrator/doctor');
+    killDoctorProbes();
+    const r = await probe(path.resolve('test/fake-claude/claude'), 0, new Tokens(), 'x', [], ',', 'mcp__slackboard__', false);
+    expect(r.code).toBe(-1); expect(r.pid).toBeUndefined(); expect(liveProbePids.size).toBe(0);
   });
 });
 

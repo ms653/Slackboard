@@ -26,10 +26,13 @@ export function binSignature(bin: string): string {
 
 /** Live doctor probe child pids, so a signal during doctor can kill them (F2). */
 export const liveProbePids = new Set<number>();
-export function killDoctorProbes(): void { for (const pid of liveProbePids) { try { killGroup(pid, 'SIGKILL'); } catch {} } liveProbePids.clear(); }
+let stopped = false;
+export function resetDoctorStop(): void { stopped = false; }
+export function killDoctorProbes(): void { stopped = true; for (const pid of liveProbePids) { try { killGroup(pid, 'SIGKILL'); } catch {} } liveProbePids.clear(); }
 
-async function probe(bin: string, port: number, tokens: Tokens, prompt: string, extraAllowed: string[], sep: string, prefix: string,
+export async function probe(bin: string, port: number, tokens: Tokens, prompt: string, extraAllowed: string[], sep: string, prefix: string,
                      watchArgv: boolean): Promise<{ s: ParseState; code: number | null; pid?: number; startOk: boolean; argvSeen: boolean; calls: unknown[] }> {
+  if (stopped) return { s: newState(), code: -1, startOk: false, argvSeen: false, calls: [] };
   const dir = ensureDir(path.join(paths.doctorDir(), crypto.randomBytes(6).toString('hex')));
   const calls: unknown[] = [];
   const dt = tokens.issueDoctor((_t, input) => calls.push(input));
@@ -61,6 +64,7 @@ async function probe(bin: string, port: number, tokens: Tokens, prompt: string, 
 }
 
 export async function runDoctor(db: DB, bin: string, port: number, tokens: Tokens): Promise<{ ok: boolean; checks: Check[] }> {
+  stopped = false;
   const checks: Check[] = [];
   const add = (id: string, ok: boolean, level: Check['level'], detail: string) => checks.push({ id, ok, level: ok ? 'info' : level, detail });
   const resolved = resolveBin(bin);
@@ -92,6 +96,7 @@ export async function runDoctor(db: DB, bin: string, port: number, tokens: Token
       add('D5 path scope', !leaked, 'warn', leaked ? 'Write outside cwd succeeded: path-scoped rules not enforced' : 'write outside cwd denied');
     }
   }
+  if (stopped) return { ok: false, checks };
   setArgvFallback(argvFallback);
   const ok = checks.every((c) => c.ok || c.level !== 'fail');
   const report = { at: now(), ok, checks, prefix, sep, argv_fallback: argvFallback, model, bin_sig: binSignature(bin) };
