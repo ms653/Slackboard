@@ -111,7 +111,8 @@ async function sweep(): Promise<void> {
 }
 
 async function killAll(why: 'kill' | 'shutdown'): Promise<number[]> {
-  killDoctorProbes();
+  // Doctor probes are stopped only on shutdown (signal handler). The kill switch blocks every claim anyway, and
+  // aborting a running doctor here would leave doctor_report unwritten (first boot) or a stale pass in place.
   const list = [...children.values()];
   tokens.revokeAll();
   for (const c of list) {
@@ -139,8 +140,9 @@ async function doctor(force = false): Promise<void> {
     log('running doctor probes against', BIN());
     db.prepare(`UPDATE agents SET presence='disabled'`).run();
     const r = await runDoctor(db, BIN(), toolPort, tokens);
-    const fresh = JSON.parse((db.prepare(`SELECT doctor_report FROM system_state WHERE id=1`).get() as any).doctor_report);
-    sep = fresh.sep ?? ',';
+    const raw = (db.prepare(`SELECT doctor_report FROM system_state WHERE id=1`).get() as any).doctor_report;
+    const fresh = raw ? JSON.parse(raw) : null;               // null if doctor was stopped before writing a report
+    sep = fresh?.sep ?? ',';
     log(`doctor ${r.ok ? 'passed' : 'FAILED'}:`, r.checks.map((c) => `${c.id}=${c.ok ? 'ok' : c.level}`).join(' '));
   } finally { doctorRunning = false; refreshAllPresence(db); }
 }
@@ -170,7 +172,7 @@ async function boot(): Promise<void> {
     if (p === 'wake') { setImmediate(tick); return {}; }
     if (p === 'kill') { if (!killing) { killing = true; killAll('kill').catch((e) => log('killAll error', e?.message)).finally(() => { killing = false; }); } return { accepted: true }; }   // survivors arrive in the kill.engaged follow-up event
     if (p === 'cancel') { const c = children.get(Number(body.job_id)); if (c) killChild(c, 'cancelled', tokens); return {}; }
-    if (p === 'doctor') { doctor(true); return { started: true }; }
+    if (p === 'doctor') { doctor(true).catch((e) => log('doctor error', e?.message)); return { started: true }; }
     return { ok: false };
   } });
   toolPort = (server.address() as any).port;
