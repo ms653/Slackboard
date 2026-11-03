@@ -25,7 +25,7 @@ describe('card badges (UX §5/§8)', () => {
     const db = freshEnv(); setDbForTests(db);
     const { task_id } = userTask(db);
     const j = claim(db)!;
-    db.prepare(`UPDATE jobs SET status='queued', lease_owner=NULL, lease_expires_at=NULL, attempts=1, continuations=1, failure_kind='max_turns' WHERE id=?`).run(j.id);
+    db.prepare(`UPDATE jobs SET status='queued', lease_owner=NULL, lease_expires_at=NULL, run_token_hash=NULL, attempts=1, continuations=1, failure_kind='max_turns' WHERE id=?`).run(j.id);
     expect(badgeOf(task_id)).toEqual({ icon: '⟲', text: 'Continuing (turn limit)' });
     db.prepare(`UPDATE jobs SET failure_kind='no_handoff' WHERE id=?`).run(j.id);
     expect((badgeOf(task_id) as any).text).toBe('Continuing (no handoff)');
