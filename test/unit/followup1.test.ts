@@ -179,3 +179,18 @@ describe('UX-safety drag data', () => {
     expect(parseDragId(dt({ [TASK_MIME]: 'abc' }))).toBeNull();
   });
 });
+
+describe('F1 review 4: shutdown before doctor runs', () => {
+  it('runDoctor after killDoctorProbes() spawns nothing and writes no report', async () => {
+    const { runDoctor, killDoctorProbes, resetDoctorStop, liveProbePids } = await import('@/orchestrator/doctor');
+    const db = freshEnv();
+    db.prepare(`UPDATE system_state SET doctor_report=NULL, doctor_ok_at=NULL WHERE id=1`).run();
+    killDoctorProbes();                                   // signal arrived before doctor() started
+    const fake = path.resolve(__dirname, '../fake-claude/claude');
+    const r = await runDoctor(db, fake, 1, new Tokens());
+    expect(r.ok).toBe(false);
+    expect(liveProbePids.size).toBe(0);
+    expect((db.prepare(`SELECT doctor_report FROM system_state WHERE id=1`).get() as any).doctor_report).toBeNull();
+    resetDoctorStop();                                    // leave module state clean for other tests
+  });
+});

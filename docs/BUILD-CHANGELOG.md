@@ -25,3 +25,4 @@ Final verification: tsc clean · next build clean · unit 31/31 · e2e 10/10 (S1
 Follow-up F1 review fixes: ENG-F1, UX-safety -> lib/domain/finish.ts, components/dnd.ts, components/Views.tsx, test/unit/followup1.test.ts
 Round (ENG-F2, ENG-F3, kill guard): ENG-F2/ENG-F3/kill-guard -> lib/domain/finish.ts, orchestrator/spawn.ts, orchestrator/doctor.ts, orchestrator/main.ts, test/unit/followup1.test.ts
 - F1 review fixes 3 (orchestrator): killAll no longer stops doctor probes (shutdown handler still does); null-safe doctor_report read; forced doctor errors caught. -> orchestrator/main.ts
+- F1 review fixes 4 (orchestrator): runDoctor no longer clears the stop flag; doctor()/boot() bail out once shutting down; probes killed again right before exit; test added. -> orchestrator/doctor.ts, orchestrator/main.ts, test/unit/followup1.test.ts

@@ -64,7 +64,8 @@ export async function probe(bin: string, port: number, tokens: Tokens, prompt: s
 }
 
 export async function runDoctor(db: DB, bin: string, port: number, tokens: Tokens): Promise<{ ok: boolean; checks: Check[] }> {
-  stopped = false;
+  // `stopped` is cleared only by the caller (resetDoctorStop) when it is not shutting down; never here,
+  // or a shutdown signal that arrived before this call would be forgotten and probes would spawn.
   const checks: Check[] = [];
   const add = (id: string, ok: boolean, level: Check['level'], detail: string) => checks.push({ id, ok, level: ok ? 'info' : level, detail });
   const resolved = resolveBin(bin);

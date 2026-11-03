@@ -12,7 +12,7 @@ import { getTask } from '@/lib/domain/rounds';
 import { procStart, isOurs, killJobProcs, procTargets, sweepByMarker, killGroup, setArgvFallback, groupAlive } from '@/lib/proc';
 import { startToolServer, Tokens } from './toolserver';
 import { spawnJob, killChild, markKilled, type Child, type SpawnCtx } from './spawn';
-import { runDoctor, binSignature, killDoctorProbes } from './doctor';
+import { runDoctor, binSignature, killDoctorProbes, resetDoctorStop } from './doctor';
 
 const HEARTBEAT_MS = 15_000, IDLE_MS = Number(process.env.SB_IDLE_MS || 180_000);
 const WALL: Record<string, number> = { respond: 240_000, help: 240_000, review: 360_000, work: 900_000 };
@@ -132,13 +132,15 @@ async function killAll(why: 'kill' | 'shutdown'): Promise<number[]> {
 }
 
 async function doctor(force = false): Promise<void> {
-  if (doctorRunning) return; doctorRunning = true;
+  if (shuttingDown || doctorRunning) return; doctorRunning = true;
   try {
     const s = db.prepare(`SELECT doctor_ok_at, doctor_report FROM system_state WHERE id=1`).get() as any;
     const rep = s.doctor_report ? JSON.parse(s.doctor_report) : null;
     if (!force && s.doctor_ok_at && rep?.bin_sig === binSignature(BIN())) { sep = rep.sep ?? ','; setArgvFallback(rep.argv_fallback !== false); return; }
     log('running doctor probes against', BIN());
     db.prepare(`UPDATE agents SET presence='disabled'`).run();
+    if (shuttingDown) return;
+    resetDoctorStop();
     const r = await runDoctor(db, BIN(), toolPort, tokens);
     const raw = (db.prepare(`SELECT doctor_report FROM system_state WHERE id=1`).get() as any).doctor_report;
     const fresh = raw ? JSON.parse(raw) : null;               // null if doctor was stopped before writing a report
@@ -156,6 +158,7 @@ function installSignalHandlers(): void {
     killDoctorProbes();
     try { await killAll('shutdown'); } catch (e: any) { log('killAll error', e?.message); }   // close handlers requeue them (J11 orphaned); anything left is recovered at next boot
     await new Promise((r) => setTimeout(r, 300));
+    killDoctorProbes();                     // backstop: anything a racing doctor spawned meanwhile
     process.exit(0);
   });
 }
@@ -165,6 +168,7 @@ async function boot(): Promise<void> {
   ensureDir(dataDir());
   acquireSingleton();
   await recoverOrphans();
+  if (shuttingDown) return;
   let control = '';
   try { control = fs.readFileSync(paths.controlToken(), 'utf8').trim(); } catch {}
   if (!control) { control = randomToken(); fs.writeFileSync(paths.controlToken(), control, { mode: 0o600 }); }
@@ -175,10 +179,12 @@ async function boot(): Promise<void> {
     if (p === 'doctor') { doctor(true).catch((e) => log('doctor error', e?.message)); return { started: true }; }
     return { ok: false };
   } });
+  if (shuttingDown) return;
   toolPort = (server.address() as any).port;
   db.prepare(`UPDATE system_state SET tool_server_port=? WHERE id=1`).run(toolPort);
   if (process.argv.includes('--doctor-only')) { await doctor(true); process.exit(0); }
   await doctor();
+  if (shuttingDown) return;
   emit(db, 'orchestrator.started', 'system', 'system', 1, { me: ME, port: toolPort });
   refreshAllPresence(db);
   log(`started ${ME}, tool server 127.0.0.1:${toolPort}, data ${dataDir()}`);
