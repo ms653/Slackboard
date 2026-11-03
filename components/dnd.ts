@@ -17,3 +17,10 @@ export function dropMove(from: string, to: string): DropResult {
   if (from === 'blocked') return { kind: 'reject', message: `Blocked tasks can only move to To do or In review (Unblock)` };
   return { kind: 'reject', message: `Only agents can move ${LABEL[from]} → ${LABEL[to]}` };
 }
+
+/** Custom MIME type so dragging arbitrary selected text (e.g. "12") never acts as a task drag. */
+export const TASK_MIME = 'application/x-slackboard-task';
+export function parseDragId(dt: { getData(t: string): string }): number | null {
+  const n = Number(dt.getData(TASK_MIME));
+  return Number.isInteger(n) && n > 0 ? n : null;
+}

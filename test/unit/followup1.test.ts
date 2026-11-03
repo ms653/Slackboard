@@ -13,6 +13,7 @@ describe('F1 budget estimate', () => {
     userTask(db);
     const w = claim(db)!;
     expect(w.budget_reserved_usd).toBe(1.0);
+    db.prepare(`UPDATE jobs SET pid=4242 WHERE id=?`).run(w.id);
     tx(db, () => finishAttempt(db, w.id, { failure: 'orphaned' }, ME));
     expect(job(db, w.id).cost_usd).toBe(1.0);
     const ev = db.prepare(`SELECT payload FROM events WHERE type='job.attempt_finished' AND entity_id=?`).get(String(w.id)) as any;
@@ -24,6 +25,25 @@ describe('F1 budget estimate', () => {
     const w = claim(db)!;
     tx(db, () => finishAttempt(db, w.id, { exitCode: 1, result: { subtype: 'error_during_execution', total_cost_usd: 0.02 } }, ME));
     expect(job(db, w.id).cost_usd).toBe(0.02);
+  });
+});
+
+describe('ENG-F1 no phantom spend', () => {
+  for (const failure of ['spawn_error', 'workspace_drift'] as const)
+    it(`${failure} with no process charges 0`, () => {
+      const db = freshEnv(); userTask(db);
+      const w = claim(db)!;
+      tx(db, () => finishAttempt(db, w.id, { failure }, ME));
+      expect(job(db, w.id).cost_usd).toBe(0);
+      const ev = db.prepare(`SELECT payload FROM events WHERE type='job.attempt_finished' AND entity_id=?`).get(String(w.id)) as any;
+      expect(JSON.parse(ev.payload).estimated_from_cap).toBeUndefined();
+    });
+  it('killed with a pid charges the cap', () => {
+    const db = freshEnv(); userTask(db);
+    const w = claim(db)!;
+    db.prepare(`UPDATE jobs SET pid=4242 WHERE id=?`).run(w.id);
+    tx(db, () => finishAttempt(db, w.id, { killedFor: 'timeout_wall' }, ME));
+    expect(job(db, w.id).cost_usd).toBe(1.0);
   });
 });
 
@@ -109,7 +129,7 @@ describe('F9 breakpoints (UX §2)', () => {
   });
 });
 
-import { dropMove } from '../../components/dnd';
+import { dropMove, parseDragId, TASK_MIME } from '../../components/dnd';
 describe('F10 board drop rules (UX §5)', () => {
   it('allows only user transitions', () => {
     expect(dropMove('blocked', 'todo')).toEqual({ kind: 'unblock' });
@@ -120,5 +140,14 @@ describe('F10 board drop rules (UX §5)', () => {
     expect(dropMove('in_review', 'done')).toEqual({ kind: 'reject', message: 'Only the reviewer can move In review → Done' });
     for (const [f, t] of [['todo', 'in_progress'], ['done', 'in_review'], ['done', 'cancelled'], ['cancelled', 'todo'], ['proposed', 'todo'], ['todo', 'proposed'], ['blocked', 'done']])
       expect(dropMove(f, t).kind).toBe('reject');
+  });
+});
+
+describe('UX-safety drag data', () => {
+  it('only the custom MIME type is accepted', () => {
+    const dt = (m: Record<string, string>) => ({ getData: (t: string) => m[t] ?? '' });
+    expect(parseDragId(dt({ [TASK_MIME]: '12' }))).toBe(12);
+    expect(parseDragId(dt({ 'text/plain': '12' }))).toBeNull();
+    expect(parseDragId(dt({ [TASK_MIME]: 'abc' }))).toBeNull();
   });
 });

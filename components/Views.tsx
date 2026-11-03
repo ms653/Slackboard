@@ -5,7 +5,7 @@ import { api } from './api';
 import { Composer } from './Composer';
 import { ActionButton, Dialog, NoteDialog, Presence, TaskStatus, Time, usd } from './ui';
 import { retryToast } from './NeedsYou';
-import { dropMove } from './dnd';
+import { dropMove, parseDragId, TASK_MIME } from './dnd';
 
 /** Card drop handlers by task id; each TaskCard registers itself so the board can route a drop to the card's own dialogs. */
 const dropHandlers = new Map<number, (target: string) => void>();
@@ -74,7 +74,7 @@ export function TaskCard({ t, now }: { t: any; now: number }) {
   });
   useEffect(() => () => { dropHandlers.delete(t.id); }, [t.id]);
   return (
-    <li aria-label={name} data-task-card={t.id} tabIndex={0} draggable onDragStart={(e) => { e.dataTransfer.setData('text/plain', String(t.id)); e.dataTransfer.effectAllowed = 'move'; }}
+    <li aria-label={name} data-task-card={t.id} tabIndex={0} draggable onDragStart={(e) => { e.dataTransfer.setData(TASK_MIME, String(t.id)); e.dataTransfer.effectAllowed = 'move'; }}
       className="bg-slate-800 border border-slate-700 rounded p-2 text-sm focus:outline focus:outline-2 focus:outline-sky-400 cursor-pointer"
       onClick={() => open({ kind: 'task', id: t.id })}
       onKeyDown={(e) => { if (e.key === 'Enter') open({ kind: 'task', id: t.id }); if (e.key === 'm' && moves.length) { e.preventDefault(); setMenu(true); } }}>
@@ -120,7 +120,7 @@ export function Board({ now }: { now: number }) {
             <div key={k} data-board-col={k} className={`min-w-[11rem] flex-1 flex flex-col rounded ${over === k ? 'outline outline-2 outline-sky-500' : ''}`}
               onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; }} onDragEnter={() => setOver(k)}
               onDragLeave={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setOver((o) => (o === k ? null : o)); }}
-              onDrop={(e) => { e.preventDefault(); setOver(null); const id = Number(e.dataTransfer.getData('text/plain')); if (id) dropHandlers.get(id)?.(k); }}>
+              onDrop={(e) => { e.preventDefault(); setOver(null); const id = parseDragId(e.dataTransfer); if (id) dropHandlers.get(id)?.(k); }}>
               <h3 className="text-xs uppercase tracking-wide text-slate-400 mb-2">{l} ({total})</h3>
               <ul aria-label={`${l}, ${total} task${total === 1 ? '' : 's'}`} className="space-y-2 overflow-y-auto" data-nav-list="column">
                 {ts.length === 0 && <li className="text-xs text-slate-500">No tasks.</li>}

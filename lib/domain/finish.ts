@@ -94,8 +94,8 @@ export function finishAttempt(db: DB, jobId: number, o: Outcome, expectedOwner: 
   const ss = db.prepare(`SELECT kill_switch, pause_reason FROM system_state WHERE id=1`).get() as { kill_switch: number; pause_reason: string | null };
   const c = classify(db, j, o, ss.kill_switch === 1);
   const t = now();
-  const estimated = !o.result;                                   // no result: charge the reserved cap as a conservative estimate
-  const cost = o.result ? o.result.total_cost_usd ?? 0 : j.budget_reserved_usd ?? 0;
+  const estimated = !o.result && j.pid != null && o.failure !== 'spawn_error' && o.failure !== 'workspace_drift';   // estimate from the cap only if a process actually started
+  const cost = o.result ? o.result.total_cost_usd ?? 0 : estimated ? j.budget_reserved_usd ?? 0 : 0;
   const subtype = o.result?.subtype ? (SUBTYPES.includes(o.result.subtype) ? o.result.subtype : 'error_during_execution') : null;
   db.prepare(`UPDATE jobs SET cost_usd = cost_usd + ?, num_turns = ?, result_subtype = ?, exit_code = ?, error = ?,
               permission_denials = permission_denials + ? WHERE id = ?`)
