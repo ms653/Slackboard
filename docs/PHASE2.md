@@ -82,7 +82,7 @@ Fixtures: fresh DB. Budgets are $5/day est., 60 runs/day and 25 per 5 h. `max_co
 | Peer help waits behind the peer's own running work job (or a peer that can't run) | `queueReason` on the Blocked card; user action "Ask the director instead"; T11c auto-reroute after 10 min queued or when the peer becomes ineligible | P2-S10; §T9 State machine T11c |
 | A bad skill note on a spawned worker misroutes help or tasks | Skill note is user-approved (shown on the card, ≤ 500 chars, frozen by `approvals_immutable`), escaped in `<team>`, only a routing hint; user can disable or retire the worker | §T9 Prompt renderer `<team>`; P2-S5 |
 | `highlight.js` output via `dangerouslySetInnerHTML` (XSS) | The only raw-HTML sink is hljs output (escapes input); `splitHighlightedLines` only inserts `</span>`/`<span class=…>` copies of existing tags; plain render for unknown/huge files | §T9 Diff XSS fixture |
-| Migration 2 corrupts or rejects v1 data | Per-step txn; `test/migrations/validate_v2.py` must print `OK: migration 2 validated` (Round 3 re-run pending, §T1); vitest migration tests; validator green is a release-gate item | §T1 Validation; §T9 Migration, release gate |
+| Migration 2 corrupts or rejects v1 data | Per-step txn; `test/migrations/validate_v2.py` must print `OK: migration 2 validated` (Round 3 executed green, §T1); vitest migration tests; validator green is a release-gate item | §T1 Validation; §T9 Migration, release gate |
 
 ---
 
@@ -421,7 +421,7 @@ Notes:
 - Existing tasks all have assignee `worker`, which is an active worker, so the new triggers accept all v1 data.
 - v1 `blocked/help` tasks and help-failed `blocked/job_failed` tasks (TECH `helpFailed` predicate: the task's newest finished job is a `help` job) are backfilled `help_agent_id = 'director'` (v1 help only went to the director), so B1 labels, T11b/T16, the help-end rule and J4 see a non-NULL helper. A `job_failed` task whose work/review failed (T10, never asked for help) stays NULL.
 
-**Validation:** `test/migrations/validate_v2.py` (in repo) loads `SCHEMA_SQL` from `lib/db/schema.ts`, seeds v1 data (incl. blocked `help`/`killed` tasks, a help-failed `job_failed` task and a work-failed `job_failed` task with their finished jobs), applies this block (extracted from this file between the `MIGRATION 2` markers), then asserts each trigger, the `help_agent_id` backfill and the `tool_calls` row carry-over. Run: `python3 -I test/migrations/validate_v2.py /home/user/Slackboard`. Status: Round 3 re-run pending (backfill `UPDATE` and fixtures changed; Round 2 block was green on `sqlite 3.53.1`). Any later edit to it must be re-validated (release gate, §T9).
+**Validation:** `test/migrations/validate_v2.py` (in repo) loads `SCHEMA_SQL` from `lib/db/schema.ts`, seeds v1 data (incl. blocked `help`/`killed` tasks, a help-failed `job_failed` task and a work-failed `job_failed` task with their finished jobs), applies this block (extracted from this file between the `MIGRATION 2` markers), then asserts each trigger, the `help_agent_id` backfill and the `tool_calls` row carry-over. Run: `python3 -I test/migrations/validate_v2.py /home/user/Slackboard`. Status: Round 3 block and fixtures executed green (`sqlite 3.53.1` / `OK: migration 2 validated`). Any later edit to it must be re-validated (release gate, §T9).
 
 ## T2. Agent lifecycle (new table; actor in brackets)
 
@@ -724,7 +724,7 @@ Event `help.requested {routed_to, task_id, options, peer}`. Returns `{ok, messag
   - `request_help` routing matrix (§T6.5), both caps, chain refusal;
   - `add_note` anchor auth, `line_not_in_diff`, `comment_cap`, rejected after the verdict.
 - **State machine (table-driven, extends TECH §11):**
-  - T11 to a peer → `help_agent_id`, one peer help job queued; T11b; T16 by peer wake; T16 by director wake while the peer help job is queued → that job cancelled, no help-end;
+  - T11 to a peer → `help_agent_id`, one peer help job queued, asker presence `idle` with detail "Waiting on <peer> · T-n" (not `blocked`; `blocked` only after a director escalation to the user); T11b; T16 by peer wake; T16 by director wake while the peer help job is queued → that job cancelled, no help-end;
   - help-end for a peer on J12, J10, J15, J4 and `no_handoff` → `blocked/job_failed`, `helpFailed`, Retry → director `help` with `help_agent_id = 'director'`;
   - user reply → `todo` + `work`;
   - T11c: peer help job queued ≥ 10 min (clock advanced) → `help_agent_id = 'director'`, peer job `cancelled`, no help-end, one director `help` job; peer disabled → same on the next sweep; user `reroute_help` → same immediately; peer job `running` → `409 help_running`; kill engaged → sweep does nothing;
