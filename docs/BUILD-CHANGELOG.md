@@ -26,3 +26,14 @@ Follow-up F1 review fixes: ENG-F1, UX-safety -> lib/domain/finish.ts, components
 Round (ENG-F2, ENG-F3, kill guard): ENG-F2/ENG-F3/kill-guard -> lib/domain/finish.ts, orchestrator/spawn.ts, orchestrator/doctor.ts, orchestrator/main.ts, test/unit/followup1.test.ts
 - F1 review fixes 3 (orchestrator): killAll no longer stops doctor probes (shutdown handler still does); null-safe doctor_report read; forced doctor errors caught. -> orchestrator/main.ts
 - F1 review fixes 4 (orchestrator): runDoctor no longer clears the stop flag; doctor()/boot() bail out once shutting down; probes killed again right before exit; test added. -> orchestrator/doctor.ts, orchestrator/main.ts, test/unit/followup1.test.ts
+
+## Follow-up F1: SIGNED OFF (eng approve after 5 review passes; UX approve)
+Open non-blocking notes:
+- Kill during a doctor run revokes doctor tokens (`revokeAll`), which fails D4. Revoke only job tokens on `kill`.
+- Doctor tokens aren't revoked when a probe closes. Revoke them in the probe close handler.
+- `next_run_at` uses the oldest start in the 5 h window. That's wrong if the cap was lowered below current usage.
+- An orphaned resumed attempt can be charged the cap even if it crashed before init. Fix with a per-attempt init flag.
+- Dropping a Blocked card unblocks to whatever `resumeTarget` picks, which may not be the column it was dropped on. Say so in the toast, or only allow the drop on that column.
+- `dropHandlers` is registered during render. Move it into a `useEffect`.
+- `--doctor-only` races the signal handler on exit.
+- Release gate: the manual smoke test against the real `claude` binary (TECH §11).
