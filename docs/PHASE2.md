@@ -1,6 +1,6 @@
 # Slackboard Phase 2 design (delta)
 
-Status: Phase 2 Round 2 draft. This is a delta against the shipped MVP docs: `PRD.md`, `UX.md`, `TECH.md`. Anything not mentioned here is unchanged. Section refs like "TECH §5.3" point into those docs. Scope covers TECH §12 items 1–3 only.
+Status: Phase 2 Round 3 draft. This is a delta against the shipped MVP docs: `PRD.md`, `UX.md`, `TECH.md`. Anything not mentioned here is unchanged. Section refs like "TECH §5.3" point into those docs. Scope covers TECH §12 items 1–3 only.
 
 Code facts this delta builds on (read from the repo, not from the docs):
 - `'worker'` is hardcoded in `lib/domain/tools.ts` (`post_message` wake, mentions enum, `create_task` assignee enum), `tasks.ts` (`createTask` default, `unblockTask` presence), `rounds.ts` (`resumeTarget` fallback), `wake.ts` (`@(director|worker)` parse) and `prompts/worker.md`. Every one of these becomes "the task's assignee" or "an active worker id".
@@ -47,7 +47,7 @@ Code facts this delta builds on (read from the repo, not from the docs):
 
 | Action | Who decides | Mechanism |
 |---|---|---|
-| Director adds a worker (`spawn_worker`) | **user, explicit yes** | approval kind `spend`, payload `{action:'spawn_worker', name, skill_note, model:'sonnet', daily_usd, daily_jobs}`. On Approve, the server re-validates the payload, creates the agent and its budget row, moves the approval `approved → consumed`, posts a system line in the approval's (origin) thread and enqueues a director `respond` job there so the director assigns work, all in **one txn**. Reject/expire post a system line only; the director is not woken. `spawn_worker` is the only route: `request_approval` refuses `action:'spawn_worker'` (§T6.1). This is the first single-use consumption from PRD §6 item 5. A DB trigger (`agents_spawn_gate`) refuses an agent row whose `spawn_approval_id` doesn't name an approved spawn with the same name and skill note. |
+| Director adds a worker (`spawn_worker`) | **user, explicit yes** | approval kind `spend`, payload `{action:'spawn_worker', name, skill_note, model:'sonnet', daily_usd, daily_jobs}`. On Approve, the server re-validates the payload, creates the agent and its budget row, moves the approval `approved → consumed`, posts a system line in the approval's (origin) thread and, if that thread is open and under its caps, enqueues a director `respond` job there so the director assigns work (else the line says "Director not woken", §B2), all in **one txn**. Reject/expire post a system line only; the director is not woken. `spawn_worker` is the only route: `request_approval` refuses `action:'spawn_worker'` (§T6.1). This is the first single-use consumption from PRD §6 item 5. A DB trigger (`agents_spawn_gate`) refuses an agent row whose `spawn_approval_id` doesn't name an approved spawn with the same name and skill note. |
 | Raise `max_concurrency` along with a spawn | user | optional checkbox on the approval card. It is applied in the same request through the `PUT /api/budgets` code path, never by an agent. |
 | User adds a worker in Settings | user (acting) | no approval, same as user-created tasks. |
 | Retire or disable a worker; edit a per-agent budget | user only | Settings. No agent tool exists for these. |
@@ -64,7 +64,7 @@ Fixtures: fresh DB. Budgets are $5/day est., 60 runs/day and 25 per 5 h. `max_co
 | P2-S1 | User: `@director Write docs/A.md and docs/B.md (independent)`. Director calls `spawn_worker {name:'writer2'}`. User approves with "raise to 3" checked. Director proposes T-A (worker) and T-B (writer2). User approves both. Both are reviewed and approved. | (a) `agents` has `writer2` with `spawn_approval_id` = that approval, which is `consumed`, and one `budgets` row (`scope='agent'`, `period='day'`) equal to the payload. (b) The two `work` jobs overlap: `A.started_at < B.finished_at AND B.started_at < A.finished_at`. (c) Throughout, running jobs ≤ 3, running worker jobs ≤ 2 (= max−1), and never 2 running for one agent. (d) Each work job's cwd is its own `workspaces/T-<id>/` (from `prompt.md` path and `artifacts`). (e) No worker job starts before its task's approval `decided_at`. (f) Fake run ≤ 90 s. (g) The spawn approve txn enqueued exactly one director `respond` job in the origin thread, and that job is the one that calls `create_task` for T-A/T-B. |
 | P2-S2 | Spawn approval rejected; a second spawn left to expire (clock advanced 24 h) | no `agents` row and no `budgets` row for either name; `count(jobs WHERE agent_id IN (...)) = 0`; approvals `rejected` / `expired` |
 | P2-S3 | Cap: 3 active workers exist; director calls `spawn_worker` | tool result `worker_cap`, no approval row. A direct `INSERT` of a 4th worker aborts `worker_cap`. A second `spawn_worker` while one is pending returns `spawn_pending`. |
-| P2-S4 | Per-agent budget: `writer2` with `daily_usd = 1.50`, fake cost 0.60 per run, 2 queued writer2 `work` jobs, 1 queued worker job | after the first writer2 run (room 1.50 − 0.60 = 0.90 < work cap 1.00), the next writer2 job stays queued (`job.started` count for writer2 = 1), worker's job is claimed, writer2 presence `paused`, detail `agent budget`, sidebar shows "Paused: agent budget" |
+| P2-S4 | Per-agent budget: `writer2` with `daily_usd = 1.50`, fake cost 0.60 per run, 2 queued writer2 `work` jobs, 1 queued worker job | after the first writer2 run (room 1.50 − 0.60 = 0.90 < work cap 1.00), the next writer2 job stays queued (`job.started` count for writer2 = 1), worker's job is claimed, writer2 presence `paused`, detail `agent budget`, sidebar shows "Paused: agent budget" with "until 00:00 · [Edit budget]"; the queued writer2 task's To do card and detail show "Queued: agent budget"; [Edit budget] opens Settings → Agents with writer2's `$/day` focused; exactly one `budget.hit {scope:'agent', agent:'writer2'}` event and one system line "writer2 reached its daily allowance…" that day, even after further claim ticks |
 | P2-S5 | Retire | `PUT /api/agents/writer2 {retire:true}` → `409 agent_has_open_tasks` while T-B is not terminal; after T-B is accepted → ok, `retired_at` set, `enabled = 0`. Director's next `tools/list` `create_task.assignee` enum lacks `writer2`, and `create_task {assignee:'writer2'}` → `unknown_assignee`. Retiring the last active worker → `409 last_worker`. |
 | P2-S6 | Peer help: worker's work job on T-A calls `request_help {target_agent:'writer2', question}` then ends. writer2's help job answers with `post_message {wake:true, mentions:['worker']}`. | (a) T-A goes `in_progress → blocked` (`help`) with `help_agent_id = 'writer2'`, then `→ todo → in_progress`. (b) Zero director jobs created between the `help.requested` event and the worker's next `job.started`. (c) writer2's help job ran with cwd `workspaces/T-A/` and no `Write`/`Edit` in its argv. (d) The worker's resumed prompt contains the answer inside `<untrusted kind="agent_message" author="writer2"`. (e) The worker's follow-up `post_message "thanks"` enqueues 0 jobs. (f) A third peer `request_help` on T-A → `help_cap`. writer2 calling `request_help {target_agent:'worker'}` from its help job → `not_allowed_for_role`. |
 | P2-S7 | Peer help fails: writer2's help job exits 1 on 3 attempts | T-A `blocked/job_failed`, one `needs_you` `failure` row, system line "writer2 could not answer…". Retry → a **director** `help` job is queued and `help_agent_id = 'director'`. |
@@ -82,7 +82,7 @@ Fixtures: fresh DB. Budgets are $5/day est., 60 runs/day and 25 per 5 h. `max_co
 | Peer help waits behind the peer's own running work job (or a peer that can't run) | `queueReason` on the Blocked card; user action "Ask the director instead"; T11c auto-reroute after 10 min queued or when the peer becomes ineligible | P2-S10; §T9 State machine T11c |
 | A bad skill note on a spawned worker misroutes help or tasks | Skill note is user-approved (shown on the card, ≤ 500 chars, frozen by `approvals_immutable`), escaped in `<team>`, only a routing hint; user can disable or retire the worker | §T9 Prompt renderer `<team>`; P2-S5 |
 | `highlight.js` output via `dangerouslySetInnerHTML` (XSS) | The only raw-HTML sink is hljs output (escapes input); `splitHighlightedLines` only inserts `</span>`/`<span class=…>` copies of existing tags; plain render for unknown/huge files | §T9 Diff XSS fixture |
-| Migration 2 corrupts or rejects v1 data | Per-step txn; `test/migrations/validate_v2.py` executed green (`sqlite 3.53.1 / OK: migration 2 validated`); vitest migration tests; validator green is a release-gate item | §T1 Validation; §T9 Migration, release gate |
+| Migration 2 corrupts or rejects v1 data | Per-step txn; `test/migrations/validate_v2.py` must print `OK: migration 2 validated` (Round 3 re-run pending, §T1); vitest migration tests; validator green is a release-gate item | §T1 Validation; §T9 Migration, release gate |
 
 ---
 
@@ -91,15 +91,16 @@ Fixtures: fresh DB. Budgets are $5/day est., 60 runs/day and 25 per 5 h. `max_co
 ## B1. Agents list (left pane; replaces UX §2 "AGENTS" block)
 
 ```
-| AGENTS  1 director · 3/3 workers     |
-|  ◐ director   Reviewing T-9          |
-|  ◔ worker     Queued (1) · T-7       |
-|               waiting: director slot |
-|  ● writer2    Helping worker · T-7   |
-|               Read README.md         |
-|  ⊘ tester     Paused: agent budget   |
-|               $1.20/$2.00 est. today |
-|  ▸ Retired (1)                       |
+| AGENTS  1 director · 3/3 workers         |
+|  ◐ director   Reviewing T-9              |
+|  ○ worker     Idle                       |
+|               Waiting on writer2 · T-7   |
+|  ● writer2    Helping worker · T-7       |
+|               Read README.md             |
+|  ⊘ tester     Paused: agent budget       |
+|               $1.20/$2.00 est. today     |
+|               until 00:00 · [Edit budget]|
+|  ▸ Retired (1)                           |
 ```
 - Order: director first, then workers by `created_at`; at most 3 active workers, retired ones only under "Retired (n)" (collapsed; rows show "retired 09:40"). Each row shows the presence icon and label (UX §4) and the running or queued task id.
 - `Enter` (or click) on an agent row opens, in the right pane, the thread of its running job's task, else its first queued job's task, else Settings → Agents scrolled to that agent.
@@ -109,11 +110,16 @@ Fixtures: fresh DB. Budgets are $5/day est., 60 runs/day and 25 per 5 h. `max_co
 | Presence + detail | Icon (UX §4) | Label |
 |---|---|---|
 | `working` + peer `help` job | ● filled circle | "Helping <asker> · T-n" (sub-line: last tool) |
-| `paused` + detail `agent budget` | ⊘ slashed circle | "Paused: agent budget" (sub-line: spend vs limit) |
+| `paused` + detail `agent budget` | ⊘ slashed circle | "Paused: agent budget" (sub-lines: spend vs limit; "until 00:00 · [Edit budget]") |
+| `idle` + a task of this agent `blocked/help` with `help_agent_id` set and the request not routed to the user | ○ hollow circle | "Idle" (sub-line: "Waiting on <help_agent_id> · T-n") |
+| `blocked` (UX §4) | ⏸ pause bars | "Waiting on you" only when the open help request was escalated to the user (director `request_help` → user, Needs-you help item), never while a peer or the director is answering |
+- **Action links:** for queue reason `agent budget` the row shows [Edit budget] and for `disabled` [Enable]; both also appear in the task detail next to the "Queued:" line. Each opens Settings → Agents (§B6) scrolled to that agent with the field focused (`$/day` input, or the Enabled checkbox).
+- **Budget-hit line:** on `budget.hit {scope:'agent'}` (once per agent per day, §T5.1) one system line is posted in the thread of that agent's first queued job's task: "<agent> reached its daily allowance ($x/$y est.); its runs wait until 00:00. [Edit budget]".
 - Header "AGENTS 1 director · n/3 workers". At 3/3 the director's `spawn_worker` is refused (§T6.1); no UI item.
 - **Empty (only seed worker):** under the list, "1 worker. The director can propose more (you approve)." plus [Add worker] (opens Settings §B6).
 - **Loading:** two skeleton rows. **Error** (bootstrap failed): UX §8 "Initial load" row applies.
 - Task cards (UX §5) already show `@assignee`. The Blocked reason line for `help` becomes "Blocked: waiting on <help_agent_id> (help)"; when the help job is queued and a peer's `queueReason` is not `run slots`, it appends " · <peer> <reason>", e.g. "Blocked: waiting on writer2 (help) · writer2: agent budget". For a failed peer help: "Blocked: <peer> could not answer (help failed)".
+- **Queued reason on the work:** To do and Blocked task cards and the task detail add a line "Queued: <queueReason>" for any queued job of the task whose agent's `queueReason` is not `run slots n/max` (e.g. "Queued: agent budget", "Queued: director slot reserved", "Queued: disabled"). For `blocked/help` this is the " · <peer> <reason>" suffix above, not a second line.
 
 ## B2. Spawn approval card (Needs you, UX §3 new row "Approval: add worker")
 
@@ -142,7 +148,9 @@ Fixtures: fresh DB. Budgets are $5/day est., 60 runs/day and 25 per 5 h. `max_co
   - Expired: UX §3 "Recently expired" with [Ask the director again].
   - Pending action and failure rows: UX §8 apply.
 - Payload no longer valid at approve time (e.g. bounds): `400 invalid_payload`, "This request is invalid (<hint>). Reject it." Approval stays pending.
-- After approve: a system line in the origin thread "writer2 joined (approved by you). Allowance $2.00 est./day, 10 runs/day. Director will assign work." and a toast "writer2 added. Director woken to assign work." Until that director `respond` job starts, the origin thread's composer hint reads "Director queued (after spawn approval)".
+- After approve, the UI follows the decide response `resumed` (§T2 A2, §T5.5):
+  - `resumed = <job id>`: system line in the origin thread "writer2 joined (approved by you). Allowance $2.00 est./day, 10 runs/day. Director will assign work." and toast "writer2 added. Director woken to assign work." Until that director `respond` job starts, the origin thread's composer hint reads "Director queued (after spawn approval)".
+  - `resumed = null` (`reason` `thread_capped` or `thread_closed`): system line "writer2 joined (approved by you). Allowance $2.00 est./day, 10 runs/day. Director not woken: thread capped|closed." and toast "writer2 added. Director not woken: thread capped|closed. [Raise cap | Reopen thread]" (the action matching the reason; it uses the MVP raise_cap/reopen route, which resumes the director by the MVP thread resume rule). The composer hint stays the MVP capped/closed hint; no "Director queued" hint.
 - After reject/expire: system line "Add worker writer2 rejected by you" / "…expired"; director not woken (composer hint unchanged: replying wakes it as usual).
 
 ## B3. Help between workers in a thread (UX §6 delta)
@@ -275,6 +283,7 @@ Fixtures: fresh DB. Budgets are $5/day est., 60 runs/day and 25 per 5 h. `max_co
 - **Reassign** (task detail, UX §5.1 and the "Reassign [P2]" in UX §8): shown for To do and Blocked tasks that are not agent-created top-level tasks. It is a dropdown of active workers, excluding the task's `help_agent_id`. For an agent-created top-level task the detail shows instead "Proposed by the director; to move it, cancel and ask the director to re-propose." While the task is Blocked with reason `help`, Reassign is hidden and the detail shows "Waiting on <help_agent_id>; reroute help or reply first" (R1 `409 help_pending`).
 - **Retired assignee:** on a task whose assignee is retired, Reopen, Retry and Reply-to-unblock show inline (no state change) "<agent> is retired. Create a new task or ask the director to re-propose." (`409 assignee_retired`, §T3.1).
 - **Cancel task** confirm (UX §5.1) for an agent-created top-level task adds [Cancel and ask the director to re-propose to ▾<worker>]. It cancels the task (MVP path), then opens #general with the composer prefilled `@director Re-propose T-9 "<title>" assigned to <worker>.` Nothing is sent until the user presses Enter.
+- **Deep links:** [Edit budget] and [Enable] from the agents list or task detail (§B1) open this section scrolled to that agent with the `$/day` input or the Enabled checkbox focused (for a worker with no own budget, [Set budget] opens with `$/day` focused).
 - **Add worker** is disabled at 3/3 with "Worker limit reached (3)". `$/day` must be ≥ 1.00 (the worker work cap); below it the field shows "At least $1.00: one work run reserves $1.00" (`400 allowance_below_job_cap`). Same rule for [Set budget]/[Edit budget].
 
 ---
@@ -338,8 +347,8 @@ END;
 
 -- ── tasks: assignee must be an active worker; who is answering a help request ──
 ALTER TABLE tasks ADD COLUMN help_agent_id TEXT REFERENCES agents(id);
--- v1 help always went to the director.
-UPDATE tasks SET help_agent_id='director' WHERE status='blocked' AND blocked_reason IN ('help','job_failed');
+-- v1 help always went to the director. job_failed only when help failed (helpFailed: newest finished job is a help job).
+UPDATE tasks SET help_agent_id='director' WHERE status='blocked' AND (blocked_reason='help' OR (blocked_reason='job_failed' AND (SELECT kind FROM jobs WHERE task_id=tasks.id AND finished_at IS NOT NULL ORDER BY id DESC LIMIT 1)='help'));
 
 CREATE TRIGGER tasks_assignee_active_ins BEFORE INSERT ON tasks
 WHEN NEW.assignee_agent_id IS NOT NULL AND NOT EXISTS (
@@ -410,16 +419,16 @@ Notes:
 - `ALTER … ADD COLUMN … REFERENCES` is legal because the default is NULL.
 - After `migrate()`, `PRAGMA foreign_key_check` must return no rows (unit test).
 - Existing tasks all have assignee `worker`, which is an active worker, so the new triggers accept all v1 data.
-- v1 `blocked` tasks with reason `help`/`job_failed` are backfilled `help_agent_id = 'director'` (v1 help only went to the director), so B1 labels, T11b/T16, the help-end rule and J4 see a non-NULL helper.
+- v1 `blocked/help` tasks and help-failed `blocked/job_failed` tasks (TECH `helpFailed` predicate: the task's newest finished job is a `help` job) are backfilled `help_agent_id = 'director'` (v1 help only went to the director), so B1 labels, T11b/T16, the help-end rule and J4 see a non-NULL helper. A `job_failed` task whose work/review failed (T10, never asked for help) stays NULL.
 
-**Validation:** `test/migrations/validate_v2.py` (in repo) loads `SCHEMA_SQL` from `lib/db/schema.ts`, seeds v1 data (incl. blocked `help`/`job_failed`/`killed` tasks), applies this block (extracted from this file between the `MIGRATION 2` markers), then asserts each trigger, the `help_agent_id` backfill and the `tool_calls` row carry-over. Run: `python3 -I test/migrations/validate_v2.py /home/user/Slackboard`. Status: executed green on the Round 2 block, including the backfill `UPDATE` and its fixtures (`sqlite 3.53.1` / `OK: migration 2 validated`). Any later edit to it must be re-validated (release gate, §T9).
+**Validation:** `test/migrations/validate_v2.py` (in repo) loads `SCHEMA_SQL` from `lib/db/schema.ts`, seeds v1 data (incl. blocked `help`/`killed` tasks, a help-failed `job_failed` task and a work-failed `job_failed` task with their finished jobs), applies this block (extracted from this file between the `MIGRATION 2` markers), then asserts each trigger, the `help_agent_id` backfill and the `tool_calls` row carry-over. Run: `python3 -I test/migrations/validate_v2.py /home/user/Slackboard`. Status: Round 3 re-run pending (backfill `UPDATE` and fixtures changed; Round 2 block was green on `sqlite 3.53.1`). Any later edit to it must be re-validated (release gate, §T9).
 
 ## T2. Agent lifecycle (new table; actor in brackets)
 
 | # | From | Event | To | Guard | Side effects (one txn) |
 |---|---|---|---|---|---|
 | A1 | — | `spawn_worker` (director `respond` job) | approval `pending` | §T6.1 guards | approval row (kind `spend`, 24 h), `approval` message, `approval.requested`, Needs-you item |
-| A2 | approval `pending` | Approve (user, `POST /api/approvals/:id/decide`) | agent active, `enabled = 1` | stored payload passes the §T6.1 `spawn_worker` schema and bounds again (`model = 'sonnet'`, name pattern/reserved, `daily_usd` 1.0–3.0, `daily_jobs` 1–20), else `400 invalid_payload`; name free; active workers < 3 (trigger); kill state irrelevant | approval `pending→approved`. `INSERT agents` (`id` = `display_name` = payload name, `created_at` = now, role worker, `sonnet`, max_turns 15, max_budget_usd 1.00, `allowed_tools` = MVP worker set, `skill_note`, `spawn_approval_id`). `INSERT budgets(scope='agent', agent_id, period='day', limit_usd=daily_usd, limit_jobs=daily_jobs)`. Approval `approved→consumed` (`consumed_at`). If `raise_concurrency_to`, set `system_state.max_concurrency` (validated 1–4, ≥ current). Events `approval.decided`, `approval.consumed`, `settings.changed {agent_created}`. System line in the approval's thread (§B2 text). Enqueue a director `respond` job in that thread (normal respond priority; thread caps apply as MVP) so it assigns work. `mkdir agents/<id>` after commit (idempotent; `spawnJob` also ensures it). |
+| A2 | approval `pending` | Approve (user, `POST /api/approvals/:id/decide`) | agent active, `enabled = 1` | stored payload passes the §T6.1 `spawn_worker` schema and bounds again (`model = 'sonnet'`, name pattern/reserved, `daily_usd` 1.0–3.0, `daily_jobs` 1–20), else `400 invalid_payload`; name free; active workers < 3 (trigger); kill state irrelevant | approval `pending→approved`. `INSERT agents` (`id` = `display_name` = payload name, `created_at` = now, role worker, `sonnet`, max_turns 15, max_budget_usd 1.00, `allowed_tools` = MVP worker set, `skill_note`, `spawn_approval_id`). `INSERT budgets(scope='agent', agent_id, period='day', limit_usd=daily_usd, limit_jobs=daily_jobs)`. Approval `approved→consumed` (`consumed_at`). If `raise_concurrency_to`, set `system_state.max_concurrency` (validated 1–4, ≥ current). Events `approval.decided`, `approval.consumed`, `settings.changed {agent_created}`. Enqueue a director `respond` job in that thread (normal respond priority) so it assigns work, only if the thread is open and under its caps (TECH §3.3); else no job. System line in the approval's thread (§B2 text for the outcome). Response `{status:'consumed', agent_id, resumed: job_id|null, reason: null|'thread_capped'|'thread_closed'}`. `mkdir agents/<id>` after commit (idempotent; `spawnJob` also ensures it). |
 | A3 | approval `pending` | Reject / expire (sweep) | — | — | as MVP; no agent, no budget row; system line in the approval's thread; no job enqueued |
 | A4 | — | `POST /api/agents` (user) | agent active | same name rules; trigger cap | same as A2 minus approval rows; `spawn_approval_id = NULL` |
 | A5 | active | `PUT /api/agents/:id {enabled}` (user) | enabled ↔ disabled | not retired (trigger) | MVP behaviour; queued jobs wait |
@@ -435,9 +444,9 @@ On A2, if the guard fails, the txn rolls back and the approval stays `pending` (
 |---|---|---|---|---|---|
 | T1 | — | create (user) | todo | assignee = an active worker (UI dropdown; default = enabled worker with fewest open tasks, ties by `created_at`) | as MVP |
 | T2/T3 | — | `create_task` (director) | proposed / todo | `assignee` ∈ generated enum, re-checked at call (`unknown_assignee`); omitted → fewest-open rule | as MVP |
-| T11 | in_progress | worker `work` job ends after an ok `request_help` | blocked (`help`) | — | `help_agent_id` = `routed_to` of the job's last ok `request_help` (`director` or a peer). Enqueue a `help` job for `help_agent_id` (priority 60), in the same `finishAttempt` txn as MVP |
+| T11 | in_progress | worker `work` job ends after an ok `request_help` | blocked (`help`) | — | `help_agent_id` = `routed_to` of the job's last ok `request_help` (`director` or a peer). Enqueue a `help` job for `help_agent_id` (priority 60), in the same `finishAttempt` txn as MVP. Asker presence: `idle`, detail "Waiting on <help_agent_id> · T-n" (§B1); `blocked` ("Waiting on you") only after the request is escalated to the user |
 | T11b (new) | blocked (`help`) | peer `help` job ends J5 after an ok `request_help` (escalation) | blocked (`help`) | caller is `help_agent_id` | `help_agent_id = 'director'`; enqueue director `help`; event `task.updated {help_agent_id}` |
-| T11c (new) | blocked (`help`), `help_agent_id` = a peer whose `help` job is still `queued` | user `reroute_help` (`POST /api/tasks/:id {action:'reroute_help'}`); or sweep (`rerouteStalePeerHelp`, same tick as approval expiry) when the job has been queued ≥ 10 min or the peer is disabled (retire is A6) | blocked (`help`) | kill not engaged (sweep only); peer job not `running` (else `409 help_running`) | in one txn: `help_agent_id = 'director'`; cancel the peer's queued `help` job (`failure_kind='cancelled'`, no help-end: the task no longer waits on that agent); enqueue director `help` (priority 60); system line "<peer> can't answer now (<queueReason>); asking the director instead."; `task.updated {help_agent_id}` |
+| T11c (new) | blocked (`help`), `help_agent_id` = a peer whose `help` job is still `queued` | user `reroute_help` (`POST /api/tasks/:id {action:'reroute_help'}`); or sweep (`rerouteStalePeerHelp`, same tick as approval expiry) when the job has been queued ≥ 10 min (`now − jobs.created_at ≥ 600 000 ms` on the peer `help` job) or the peer is disabled (retire is A6) | blocked (`help`) | kill not engaged (sweep only); peer job not `running` (else `409 help_running`) | in one txn: `help_agent_id = 'director'`; cancel the peer's queued `help` job (`failure_kind='cancelled'`, no help-end: the task no longer waits on that agent); enqueue director `help` (priority 60); system line "<peer> can't answer now (<queueReason>); asking the director instead."; `task.updated {help_agent_id}` |
 | T16 | blocked | as MVP; plus peer `post_message {wake:true}` mentioning the assignee by the task's `help_agent_id` (reason `help` only) | `resumeTarget` | director or the current helper may trigger T16 only for reason `help` | as MVP. When leaving `blocked`: `help_agent_id = NULL` and cancel queued `help` jobs of the task (`failure_kind='cancelled'`; help-end rule does not fire because the task is no longer `blocked/help`). Case 0 (Retry after help failed) sets `help_agent_id = 'director'`: **a failed peer help is never retried on the peer** |
 | R1 (new, not a status move) | todo, blocked (reason ≠ `help`) | Reassign (user, `POST /api/tasks/:id {action:'reassign', assignee}`) | same | not an agent-created top-level task (trigger `tasks_agent_toplevel_immutable`); target is an active worker (trigger); task not `blocked/help` (else `409 help_pending`, hint "Waiting on <help_agent_id>; reroute help or reply first": the helper's wake targets the current assignee, §T6.3); target ≠ the task's `help_agent_id` (else `409 assignee_is_helper`) | cancel queued jobs of the old assignee for the task; if `todo`, enqueue `work` for the new one; `task.updated {assignee}` |
 
@@ -453,7 +462,7 @@ On A2, if the guard fails, the txn rolls back and the approval stays `pending` (
 | J2 | claim gains the predicates in §T5.1 (retired, director slot, per-agent budget, peer-help validity) |
 | J4 | `cancelDeadQueuedJobs` also cancels queued **worker** (peer) `help` jobs whose task is not `blocked/help` or whose helper is not the job's agent: `a.role <> 'director' AND (k.status <> 'blocked' OR k.blocked_reason IS NOT 'help' OR k.help_agent_id IS NOT j.agent_id)` (`task_not_claimable`). Director `help` jobs keep MVP J4 only. |
 | J5 | the `help` guard applies to peer help jobs unchanged: success needs the task to have left `blocked/help` (asker woken) or an ok `request_help` in this job (→ T11b). Otherwise `failed (no_handoff)` + help-end rule |
-| help-end rule | unchanged condition, plus: it fires for a peer `help` job only if `task.help_agent_id = job.agent_id` at that moment (so T11c/T16 cancellations never fire it); the system line becomes "`<agent>` could not answer the help request (`<reason>`)…" |
+| help-end rule | unchanged condition, plus: it fires for a peer `help` job only if `task.help_agent_id = job.agent_id` at that moment (so T11c/T16 cancellations never fire it). Text change: the system line and Needs-you failure text name the helper instead of the fixed "director": "`<helper>` could not answer the help request (`<reason>`)…", where `<helper>` = `job.agent_id` (`director` for director help, so v1 wording is unchanged there) |
 
 ### T3.3 Approval (TECH §2 `approvals_legal_transition`)
 No new pairs. `spend`/`spawn_worker` uses `pending→approved→consumed` inside one txn (A2). All other `spend` approvals keep MVP "record only" behaviour.
@@ -494,7 +503,7 @@ Doctor D3 and doctor-mode `tools/list` (TECH §6.4) expect **seven** director-re
         AND (a.role <> 'worker' OR @maxc = 1 OR
              (SELECT count(*) FROM jobs r JOIN agents ra ON ra.id = r.agent_id
                WHERE r.status = 'running' AND ra.role = 'worker') < @maxc - 1)
-        -- per-agent daily budget (agent ids are [a-z0-9_-], safe inside a JSON path)
+        -- per-agent daily budget (agent ids match ^[a-z][a-z0-9_]{1,23}$ (§T4.1), safe inside a JSON path)
         AND j.budget_cap_usd <= ifnull(json_extract(@agentRoom, '$."' || j.agent_id || '".usd'), 1e9)
         AND ifnull(json_extract(@agentRoom, '$."' || j.agent_id || '".jobs'), 1) > 0
         -- a peer help job runs only while its task still waits on that peer
@@ -517,12 +526,14 @@ for b in SELECT agent_id, limit_usd, limit_jobs FROM budgets WHERE scope='agent'
 - **Minimum allowance rule:** a claim reserves the job's full `budget_cap_usd` (worker `work` = 1.00), so a per-agent `limit_usd` < 1.00 would block every work run. Every writer of a worker's `scope='agent'` row (`spawn_worker`, A2 re-validation, `POST /api/agents`, `PUT /api/budgets agents`) rejects `limit_usd < 1.00` with `allowance_below_job_cap`. Effective work runs/day ≈ `floor(limit_usd / 1.00)`; a peer `help` (cap 0.30) can still run on the remainder.
 - `queueReason(agent)` evaluates the same predicates one by one for the UI (§B1), in this order: `disabled`, `busy (running T-n)` (one-running-per-agent), `run slots n/max`, `director slot reserved`, `daily budget` / `job cap` (global), `agent budget` (either `@agentRoom` predicate), `thread capped`. First failing predicate wins.
 - `refreshPresence` sets `paused` with detail `agent budget` when the agent has a queued job, no running job, and fails only the per-agent predicate.
-- `budget.hit {scope:'agent', agent}` is emitted once per agent per day as a `budget.hit` event (existing type).
+- `budget.hit {scope:'agent', agent}` is emitted once per agent per day as a `budget.hit` event (existing type), in the same txn as the §B1 budget-hit system line (thread of the agent's first queued job's task).
+- `refreshPresence` for an agent with no running and no queued job and a task `blocked/help` with `help_agent_id` set: `idle`, detail `waiting on <help_agent_id> · T-n`; `blocked` only when that task's help request was escalated to the user (§B1).
 
 One running job per agent (`jobs_one_running_per_agent`) is unchanged. It still guarantees a single process per agent cwd and session. Parallelism comes only from having more agents.
 
 ### T5.2 `finishAttempt` (TECH §3.2, `lib/domain/finish.ts`)
 ```ts
+// role(agent_id) = the existing agentRole(db, agent_id) in lib/domain/jobs.ts ('director' | 'worker')
 if (c.rule === 'J5+T11' && task) {
   const target = lastOkRequestHelp(db, j.id).routed_to;                // 'director' | peer id
   setStatus(db, task, 'blocked', 'system', { blocked_reason: 'help', help_agent_id: target });
@@ -550,7 +561,7 @@ These need no logic change. `killAll` already covers every child, `procTargets` 
 
 | Route | Effect |
 |---|---|
-| `POST /api/approvals/:id/decide` `{decision, note, raise_concurrency_to?}` | spawn approvals: A2/A3; `409 worker_cap` / `name_taken` and `400 invalid_payload` leave the approval pending |
+| `POST /api/approvals/:id/decide` `{decision, note, raise_concurrency_to?}` | spawn approvals: A2/A3; A2 returns `{status, agent_id, resumed: job_id\|null, reason}` (§T2); `409 worker_cap` / `name_taken` and `400 invalid_payload` leave the approval pending |
 | `POST /api/agents` `{name, skill_note, daily_usd, daily_jobs}` | A4; same bounds as §T6.1 (`400 allowance_below_job_cap` below 1.00) |
 | `PUT /api/agents/:id` `{enabled}` \| `{retire: true}` | A5 / A6; `409 {error, hint, tasks?}` (`tasks[]` = `{id, actions}` for the §B6 hint) |
 | `PUT /api/budgets` adds `agents: {<id>: {day_usd, day_jobs}}` | upsert per-agent `day` row (`day_usd` 1.0–3.0, `400 allowance_below_job_cap` below 1.00); confirm dialog as MVP |
@@ -676,7 +687,7 @@ Event `help.requested {routed_to, task_id, options, peer}`. Returns `{ok, messag
   - fresh DB → `user_version = 2`;
   - a v1 DB with rows in every table (incl. 3 `tool_calls`) → v2 with the same `tool_calls` rows, `PRAGMA foreign_key_check` empty, `journal_mode = wal`, `foreign_keys = 1`;
   - running `migrate()` twice is a no-op;
-  - v1 `blocked/help` and `blocked/job_failed` tasks → `help_agent_id = 'director'`; other tasks stay NULL;
+  - v1 `blocked/help` and help-failed `blocked/job_failed` tasks → `help_agent_id = 'director'`; a work-failed `blocked/job_failed` task (newest finished job is `work`) and other tasks stay NULL;
   - `test/migrations/validate_v2.py` (§T1) runs against the DDL block in this doc; CI/release runs it with `python3 -I test/migrations/validate_v2.py <repo>` and requires `OK: migration 2 validated`.
 - **Triggers:**
   - 4th active worker → `worker_cap`, while a 4th after retiring one is ok;
@@ -693,7 +704,8 @@ Event `help.requested {routed_to, task_id, options, peer}`. Returns `{ok, messag
   - `raise_concurrency_to = 5` → 400 with nothing changed;
   - approve at the cap → `409 worker_cap`, approval still pending;
   - a stored payload with `daily_usd = 0.5` or `model = 'opus'` (inserted directly) → `400 invalid_payload`, nothing created, approval still pending;
-  - approve enqueues exactly one director `respond` job in the approval's thread; reject/expire enqueue none.
+  - approve enqueues exactly one director `respond` job in the approval's thread and returns `resumed` = its id; reject/expire enqueue none;
+  - approve with the origin thread at its cap (or closed) → agent created, approval `consumed`, zero director jobs, response `resumed: null, reason: 'thread_capped'` (`'thread_closed'`), system line "…Director not woken: thread capped." (e2e: toast shows [Raise cap] / [Reopen thread]).
 - **Retire (A6):** open task plus a queued `respond` job → `409 agent_has_open_tasks` and the queued job is still `queued`; running job → `agent_busy`, nothing cancelled; ok path cancels queued jobs and retires in one txn.
 - **Claim:**
   - (i) with `max_concurrency = 3`, 3 queued worker jobs on 3 workers plus a queued director job → 2 workers and the director run;
