@@ -1,6 +1,6 @@
 # Slackboard Phase 2 design (delta)
 
-Status: Phase 2 Round 3 draft. This is a delta against the shipped MVP docs: `PRD.md`, `UX.md`, `TECH.md`. Anything not mentioned here is unchanged. Section refs like "TECH §5.3" point into those docs. Scope covers TECH §12 items 1–3 only.
+Status: Phase 2 Round 4 draft. This is a delta against the shipped MVP docs: `PRD.md`, `UX.md`, `TECH.md`. Anything not mentioned here is unchanged. Section refs like "TECH §5.3" point into those docs. Scope covers TECH §12 items 1–3 only.
 
 Code facts this delta builds on (read from the repo, not from the docs):
 - `'worker'` is hardcoded in `lib/domain/tools.ts` (`post_message` wake, mentions enum, `create_task` assignee enum), `tasks.ts` (`createTask` default, `unblockTask` presence), `rounds.ts` (`resumeTarget` fallback), `wake.ts` (`@(director|worker)` parse) and `prompts/worker.md`. Every one of these becomes "the task's assignee" or "an active worker id".
@@ -82,7 +82,7 @@ Fixtures: fresh DB. Budgets are $5/day est., 60 runs/day and 25 per 5 h. `max_co
 | Peer help waits behind the peer's own running work job (or a peer that can't run) | `queueReason` on the Blocked card; user action "Ask the director instead"; T11c auto-reroute after 10 min queued or when the peer becomes ineligible | P2-S10; §T9 State machine T11c |
 | A bad skill note on a spawned worker misroutes help or tasks | Skill note is user-approved (shown on the card, ≤ 500 chars, frozen by `approvals_immutable`), escaped in `<team>`, only a routing hint; user can disable or retire the worker | §T9 Prompt renderer `<team>`; P2-S5 |
 | `highlight.js` output via `dangerouslySetInnerHTML` (XSS) | The only raw-HTML sink is hljs output (escapes input); `splitHighlightedLines` only inserts `</span>`/`<span class=…>` copies of existing tags; plain render for unknown/huge files | §T9 Diff XSS fixture |
-| Migration 2 corrupts or rejects v1 data | Per-step txn; `test/migrations/validate_v2.py` must print `OK: migration 2 validated` (Round 3 executed green, §T1); vitest migration tests; validator green is a release-gate item | §T1 Validation; §T9 Migration, release gate |
+| Migration 2 corrupts or rejects v1 data | Per-step txn; `test/migrations/validate_v2.py` must print `OK: migration 2 validated` (Round 4 executed green, §T1); vitest migration tests; validator green is a release-gate item | §T1 Validation; §T9 Migration, release gate |
 
 ---
 
@@ -103,7 +103,7 @@ Fixtures: fresh DB. Budgets are $5/day est., 60 runs/day and 25 per 5 h. `max_co
 |  ▸ Retired (1)                           |
 ```
 - Order: director first, then workers by `created_at`; at most 3 active workers, retired ones only under "Retired (n)" (collapsed; rows show "retired 09:40"). Each row shows the presence icon and label (UX §4) and the running or queued task id.
-- `Enter` (or click) on an agent row opens, in the right pane, the thread of its running job's task, else its first queued job's task, else Settings → Agents scrolled to that agent.
+- `Enter` (or click) on an agent row opens, in the right pane, the thread of its running job (the task thread if the job has a task, else the job's thread); else its oldest queued job's thread (oldest `created_at`, same task-thread rule); else, for an idle agent waiting on help ("Waiting on writer2 · T-7"), that task's thread (T-7); else Settings → Agents scrolled to that agent. A peer `help` job has the asker's task, so it opens the asker's task thread.
 - **Second line, always text:** last tool when working. When queued, the reason, which is one of: `run slots n/max`, `director slot reserved`, `agent budget`, `daily budget`, `job cap`, `thread capped`, `disabled`, `busy (running T-n)`. It is computed server-side by `queueReason(agent)` in `lib/domain/claim.ts`, from the same predicates as the claim SQL. When paused by its own budget, it shows spend vs limit.
 - New presence label variants (the `presence` enum is unchanged):
 
@@ -111,14 +111,19 @@ Fixtures: fresh DB. Budgets are $5/day est., 60 runs/day and 25 per 5 h. `max_co
 |---|---|---|
 | `working` + peer `help` job | ● filled circle | "Helping <asker> · T-n" (sub-line: last tool) |
 | `paused` + detail `agent budget` | ⊘ slashed circle | "Paused: agent budget" (sub-lines: spend vs limit; "until 00:00 · [Edit budget]") |
-| `idle` + a task of this agent `blocked/help` with `help_agent_id` set and the request not routed to the user | ○ hollow circle | "Idle" (sub-line: "Waiting on <help_agent_id> · T-n") |
-| `blocked` (UX §4) | ⏸ pause bars | "Waiting on you" only when the open help request was escalated to the user (director `request_help` → user, Needs-you help item), never while a peer or the director is answering |
+| `idle` + a task of this agent `blocked/help` with `help_agent_id` set and not `helpEscalatedToUser(task)` | ○ hollow circle | "Idle" (sub-line: "Waiting on <help_agent_id> · T-n") |
+| `blocked` (UX §4) | ⏸ pause bars | "Waiting on you" only when `helpEscalatedToUser(task)` (§T5.1), never while a peer or the director is answering |
 - **Action links:** for queue reason `agent budget` the row shows [Edit budget] and for `disabled` [Enable]; both also appear in the task detail next to the "Queued:" line. Each opens Settings → Agents (§B6) scrolled to that agent with the field focused (`$/day` input, or the Enabled checkbox).
 - **Budget-hit line:** on `budget.hit {scope:'agent'}` (once per agent per day, §T5.1) one system line is posted in the thread of that agent's first queued job's task: "<agent> reached its daily allowance ($x/$y est.); its runs wait until 00:00. [Edit budget]".
 - Header "AGENTS 1 director · n/3 workers". At 3/3 the director's `spawn_worker` is refused (§T6.1); no UI item.
+- **Keyboard and screen reader:**
+  - The list is a `list` with `aria-label` "Agents, 1 director, N of 3 workers". Each agent is a `listitem` whose main control is one button named "<agent>, <presence label>, <detail line>, last tool <x>" (omit "last tool" when none); `Enter`/click opens per the rule above.
+  - [Edit budget] / [Enable] are separate buttons after the row button in tab order. `Tab` visits the row button, then that row's actions; `j`/`k` (list focused) move focus between row buttons.
+  - "Retired (n)" is a disclosure button with `aria-expanded`.
+  - Presence/detail changes are not announced per tick. Transitions into Paused or Failed are announced once via the existing polite live region ("writer2 paused: agent budget"). `budget.hit {scope:'agent'}` announces the budget-hit system line text below.
 - **Empty (only seed worker):** under the list, "1 worker. The director can propose more (you approve)." plus [Add worker] (opens Settings §B6).
 - **Loading:** two skeleton rows. **Error** (bootstrap failed): UX §8 "Initial load" row applies.
-- Task cards (UX §5) already show `@assignee`. The Blocked reason line for `help` becomes "Blocked: waiting on <help_agent_id> (help)"; when the help job is queued and a peer's `queueReason` is not `run slots`, it appends " · <peer> <reason>", e.g. "Blocked: waiting on writer2 (help) · writer2: agent budget". For a failed peer help: "Blocked: <peer> could not answer (help failed)".
+- Task cards (UX §5) already show `@assignee`. The Blocked reason line for `help` becomes "Blocked: waiting on <help_agent_id> (help)", except when `helpEscalatedToUser(task)` (§T5.1), where it keeps the MVP text "Blocked: waiting on you (help)" (this overrides <help_agent_id>); when the help job is queued and a peer's `queueReason` is not `run slots`, it appends " · <peer> <reason>", e.g. "Blocked: waiting on writer2 (help) · writer2: agent budget". For a failed peer help: "Blocked: <peer> could not answer (help failed)".
 - **Queued reason on the work:** To do and Blocked task cards and the task detail add a line "Queued: <queueReason>" for any queued job of the task whose agent's `queueReason` is not `run slots n/max` (e.g. "Queued: agent budget", "Queued: director slot reserved", "Queued: disabled"). For `blocked/help` this is the " · <peer> <reason>" suffix above, not a second line.
 
 ## B2. Spawn approval card (Needs you, UX §3 new row "Approval: add worker")
@@ -150,7 +155,7 @@ Fixtures: fresh DB. Budgets are $5/day est., 60 runs/day and 25 per 5 h. `max_co
 - Payload no longer valid at approve time (e.g. bounds): `400 invalid_payload`, "This request is invalid (<hint>). Reject it." Approval stays pending.
 - After approve, the UI follows the decide response `resumed` (§T2 A2, §T5.5):
   - `resumed = <job id>`: system line in the origin thread "writer2 joined (approved by you). Allowance $2.00 est./day, 10 runs/day. Director will assign work." and toast "writer2 added. Director woken to assign work." Until that director `respond` job starts, the origin thread's composer hint reads "Director queued (after spawn approval)".
-  - `resumed = null` (`reason` `thread_capped` or `thread_closed`): system line "writer2 joined (approved by you). Allowance $2.00 est./day, 10 runs/day. Director not woken: thread capped|closed." and toast "writer2 added. Director not woken: thread capped|closed. [Raise cap | Reopen thread]" (the action matching the reason; it uses the MVP raise_cap/reopen route, which resumes the director by the MVP thread resume rule). The composer hint stays the MVP capped/closed hint; no "Director queued" hint.
+  - `resumed = null` (`reason` `thread_capped` or `thread_closed`): system line "writer2 joined (approved by you). Allowance $2.00 est./day, 10 runs/day." and toast plus a second system line "writer2 added. Director not woken: thread capped|closed. Raise the cap or reopen, then reply in the thread to wake it." Actions: [Raise cap] only when reason is `thread_capped` and the thread's `cap_raises = 0` (MVP raises once; else no button, the text stands alone); [Reopen thread] when `thread_closed`. Neither action enqueues a director job (MVP `resumeThread` acts only on a thread task, and the origin thread has none); the user's next reply wakes the director by the normal MVP wake rule. The composer hint stays the MVP capped/closed hint until the raise/reopen succeeds, then shows "Will wake director" (from `wakePreview`); never "Director queued".
 - After reject/expire: system line "Add worker writer2 rejected by you" / "…expired"; director not woken (composer hint unchanged: replying wakes it as usual).
 
 ## B3. Help between workers in a thread (UX §6 delta)
@@ -229,7 +234,7 @@ Fixtures: fresh DB. Budgets are $5/day est., 60 runs/day and 25 per 5 h. `max_co
   - "Will be sent with the worker's next run" (not yet in any worker `work` run and the artifact is still the task's latest);
   - "Sent to worker run #n" (its id is in that job's `job.started.review_note_ids`);
   - "Not sent: round closed" (the task reached `done`/`cancelled`, or a newer artifact exists, before any worker run included it).
-  - User adds a comment with [+ Comment] or `c` on a focused line. That opens an inline textarea (≤ 4000 chars), Save/Cancel, `Ctrl+Enter` saves, `Esc` cancels and returns focus to the line.
+  - User adds a comment with [+ Comment] or `c` on a focused line. Side: in unified view `c` anchors `side='old'` on a `−` line and `'new'` on `+` and context lines; in side by side it anchors to the focused cell's side (`←`/`→`, §B5). That opens an inline textarea (≤ 4000 chars), Save/Cancel, `Ctrl+Enter` saves, `Esc` cancels and returns focus to the line.
   - [+ Comment] appears only on the task's **latest** artifact while the task is `in_review`, `blocked` or `todo` (delivery guaranteed: the next worker run renders it, §T4.3). While the worker's `work` job runs (`in_progress`) it is disabled with "Worker is running; comment after it submits". On older rounds and `done`/`cancelled` tasks it is hidden and the toolbar says "Comments closed for this round". Comments do not wake anyone. The director also sees them on its next `review` run of that artifact.
 - **Highlighting:** applied by file extension. Files with > 1,000 diff lines, unknown extensions and the compare view's renamed files render plain. Colour is never the only signal (prefix and screen-reader text, below).
 - **States:**
@@ -253,8 +258,9 @@ Fixtures: fresh DB. Budgets are $5/day est., 60 runs/day and 25 per 5 h. `max_co
 |---|---|
 | `n` / `p` | next / previous hunk. Focus goes to the hunk heading and the polite live region says "Hunk 3 of 7, docs/INSTALL.md, lines 40 to 52" |
 | `]` / `[` | next / previous file (focus goes to the file heading) |
-| `↑` / `↓` | previous / next line inside the focused hunk (roving `tabindex`; `Tab` leaves the diff) |
-| `c` | comment on the focused line (user) |
+| `↑` / `↓` | previous / next line inside the focused hunk (roving `tabindex`; `Tab` leaves the diff); in side by side focus stays on the same side |
+| `←` / `→` | side by side only: move focus between the old and new cell of the row; an empty padded cell is skipped and the polite region says "no line on this side" |
+| `c` | comment on the focused line (user): unified `−` line → `side='old'`, `+`/context → `'new'`; side by side → the focused cell's side |
 | `v` | toggle unified / side by side (no-op with the announced reason when too narrow) |
 | `x` | expand / collapse the review view (focus: review heading / Expand button) |
 | `Esc` | collapse when expanded and no textarea is open (otherwise UX §10 close rules) |
@@ -262,7 +268,8 @@ Fixtures: fresh DB. Budgets are $5/day est., 60 runs/day and 25 per 5 h. `max_co
 
 - Structure: each file is a `region` with an `h3`. Each hunk is a `group` with an `h4`, "Hunk k of N, lines a to b". Lines are rows of a `table` with `aria-rowcount`. Side by side uses two cells per row with column headers "old" and "new".
 - Every line's accessible text starts with the visually hidden prefix "added line 12:", "removed line 8:" or "unchanged line 10:". In side by side the cell names are "old line 8, removed" and "new line 12, added". The `+`/`−` glyphs stay in the DOM (UX §11).
-- Comments are `role="note"` with name "Comment by director on new line 12". The comment textarea has the label "Comment on new line 12 of docs/INSTALL.md".
+- Comments are `role="note"` with name "Comment by <author> on <side> line <n>" (e.g. "Comment by director on old line 8"). The comment textarea label states the side and line: "Comment on old line 8 of docs/INSTALL.md" / "Comment on new line 12 of docs/INSTALL.md".
+- Agents list keys (`j`/`k`, Tab order, announcements): §B1.
 - Highlight spans carry no semantics. Tokens use AA-contrast colours on both added and removed backgrounds, and the theme is tested by axe.
 
 ## B6. Settings delta (UX §12)
@@ -347,8 +354,8 @@ END;
 
 -- ── tasks: assignee must be an active worker; who is answering a help request ──
 ALTER TABLE tasks ADD COLUMN help_agent_id TEXT REFERENCES agents(id);
--- v1 help always went to the director. job_failed only when help failed (helpFailed: newest finished job is a help job).
-UPDATE tasks SET help_agent_id='director' WHERE status='blocked' AND (blocked_reason='help' OR (blocked_reason='job_failed' AND (SELECT kind FROM jobs WHERE task_id=tasks.id AND finished_at IS NOT NULL ORDER BY id DESC LIMIT 1)='help'));
+-- v1 help always went to the director. job_failed only when help failed (helpFailed: newest failed/killed/cancelled job is a help job).
+UPDATE tasks SET help_agent_id='director' WHERE status='blocked' AND (blocked_reason='help' OR (blocked_reason='job_failed' AND (SELECT kind FROM jobs WHERE task_id=tasks.id AND finished_at IS NOT NULL AND status IN ('failed','killed','cancelled') ORDER BY id DESC LIMIT 1)='help'));
 
 CREATE TRIGGER tasks_assignee_active_ins BEFORE INSERT ON tasks
 WHEN NEW.assignee_agent_id IS NOT NULL AND NOT EXISTS (
@@ -419,16 +426,16 @@ Notes:
 - `ALTER … ADD COLUMN … REFERENCES` is legal because the default is NULL.
 - After `migrate()`, `PRAGMA foreign_key_check` must return no rows (unit test).
 - Existing tasks all have assignee `worker`, which is an active worker, so the new triggers accept all v1 data.
-- v1 `blocked/help` tasks and help-failed `blocked/job_failed` tasks (TECH `helpFailed` predicate: the task's newest finished job is a `help` job) are backfilled `help_agent_id = 'director'` (v1 help only went to the director), so B1 labels, T11b/T16, the help-end rule and J4 see a non-NULL helper. A `job_failed` task whose work/review failed (T10, never asked for help) stays NULL.
+- v1 `blocked/help` tasks and help-failed `blocked/job_failed` tasks (TECH `helpFailed` predicate: the task's newest `failed`/`killed`/`cancelled` job is a `help` job; succeeded jobs are ignored) are backfilled `help_agent_id = 'director'` (v1 help only went to the director), so B1 labels, T11b/T16, the help-end rule and J4 see a non-NULL helper. A `job_failed` task whose work/review failed (T10, never asked for help) stays NULL.
 
-**Validation:** `test/migrations/validate_v2.py` (in repo) loads `SCHEMA_SQL` from `lib/db/schema.ts`, seeds v1 data (incl. blocked `help`/`killed` tasks, a help-failed `job_failed` task and a work-failed `job_failed` task with their finished jobs), applies this block (extracted from this file between the `MIGRATION 2` markers), then asserts each trigger, the `help_agent_id` backfill and the `tool_calls` row carry-over. Run: `python3 -I test/migrations/validate_v2.py /home/user/Slackboard`. Status: Round 3 block and fixtures executed green (`sqlite 3.53.1` / `OK: migration 2 validated`). Any later edit to it must be re-validated (release gate, §T9).
+**Validation:** `test/migrations/validate_v2.py` (in repo) loads `SCHEMA_SQL` from `lib/db/schema.ts`, seeds v1 data (incl. blocked `help`/`killed` tasks, a help-failed `job_failed` task, a work-failed `job_failed` task, and a work-failed `job_failed` task whose newest finished job is a *succeeded* help (task 14, stays NULL), with their finished jobs), applies this block (extracted from this file between the `MIGRATION 2` markers), then asserts each trigger, the `help_agent_id` backfill and the `tool_calls` row carry-over. Run: `python3 -I test/migrations/validate_v2.py /home/user/Slackboard`. Status: Round 4 block and fixtures executed green (`sqlite 3.53.1` / `OK: migration 2 validated`).53.1`). Any later edit to it must be re-validated (release gate, §T9).
 
 ## T2. Agent lifecycle (new table; actor in brackets)
 
 | # | From | Event | To | Guard | Side effects (one txn) |
 |---|---|---|---|---|---|
 | A1 | — | `spawn_worker` (director `respond` job) | approval `pending` | §T6.1 guards | approval row (kind `spend`, 24 h), `approval` message, `approval.requested`, Needs-you item |
-| A2 | approval `pending` | Approve (user, `POST /api/approvals/:id/decide`) | agent active, `enabled = 1` | stored payload passes the §T6.1 `spawn_worker` schema and bounds again (`model = 'sonnet'`, name pattern/reserved, `daily_usd` 1.0–3.0, `daily_jobs` 1–20), else `400 invalid_payload`; name free; active workers < 3 (trigger); kill state irrelevant | approval `pending→approved`. `INSERT agents` (`id` = `display_name` = payload name, `created_at` = now, role worker, `sonnet`, max_turns 15, max_budget_usd 1.00, `allowed_tools` = MVP worker set, `skill_note`, `spawn_approval_id`). `INSERT budgets(scope='agent', agent_id, period='day', limit_usd=daily_usd, limit_jobs=daily_jobs)`. Approval `approved→consumed` (`consumed_at`). If `raise_concurrency_to`, set `system_state.max_concurrency` (validated 1–4, ≥ current). Events `approval.decided`, `approval.consumed`, `settings.changed {agent_created}`. Enqueue a director `respond` job in that thread (normal respond priority) so it assigns work, only if the thread is open and under its caps (TECH §3.3); else no job. System line in the approval's thread (§B2 text for the outcome). Response `{status:'consumed', agent_id, resumed: job_id|null, reason: null|'thread_capped'|'thread_closed'}`. `mkdir agents/<id>` after commit (idempotent; `spawnJob` also ensures it). |
+| A2 | approval `pending` | Approve (user, `POST /api/approvals/:id/decide`) | agent active, `enabled = 1` | stored payload passes the §T6.1 `spawn_worker` schema and bounds again (`model = 'sonnet'`, name pattern/reserved, `daily_usd` 1.0–3.0, `daily_jobs` 1–20), else `400 invalid_payload`; name free; active workers < 3 (trigger); kill state irrelevant | approval `pending→approved`. `INSERT agents` (`id` = `display_name` = payload name, `created_at` = now, role worker, `sonnet`, max_turns 15, max_budget_usd 1.00, `allowed_tools` = MVP worker set, `skill_note`, `spawn_approval_id`). `INSERT budgets(scope='agent', agent_id, period='day', limit_usd=daily_usd, limit_jobs=daily_jobs)`. Approval `approved→consumed` (`consumed_at`). If `raise_concurrency_to`, set `system_state.max_concurrency` (validated 1–4, ≥ current). Events `approval.decided`, `approval.consumed`, `settings.changed {agent_created}`. Enqueue a director `respond` job in that thread (normal respond priority) so it assigns work, only if the thread is open and under its caps (TECH §3.3); else no job and no later automatic wake (raise cap / reopen do not enqueue for a task-less thread; the user's reply wakes the director, §B2). System line in the approval's thread (§B2 text for the outcome). Response `{status:'consumed', agent_id, resumed: job_id|null, reason: null|'thread_capped'|'thread_closed'}`. `mkdir agents/<id>` after commit (idempotent; `spawnJob` also ensures it). |
 | A3 | approval `pending` | Reject / expire (sweep) | — | — | as MVP; no agent, no budget row; system line in the approval's thread; no job enqueued |
 | A4 | — | `POST /api/agents` (user) | agent active | same name rules; trigger cap | same as A2 minus approval rows; `spawn_approval_id = NULL` |
 | A5 | active | `PUT /api/agents/:id {enabled}` (user) | enabled ↔ disabled | not retired (trigger) | MVP behaviour; queued jobs wait |
@@ -444,7 +451,7 @@ On A2, if the guard fails, the txn rolls back and the approval stays `pending` (
 |---|---|---|---|---|---|
 | T1 | — | create (user) | todo | assignee = an active worker (UI dropdown; default = enabled worker with fewest open tasks, ties by `created_at`) | as MVP |
 | T2/T3 | — | `create_task` (director) | proposed / todo | `assignee` ∈ generated enum, re-checked at call (`unknown_assignee`); omitted → fewest-open rule | as MVP |
-| T11 | in_progress | worker `work` job ends after an ok `request_help` | blocked (`help`) | — | `help_agent_id` = `routed_to` of the job's last ok `request_help` (`director` or a peer). Enqueue a `help` job for `help_agent_id` (priority 60), in the same `finishAttempt` txn as MVP. Asker presence: `idle`, detail "Waiting on <help_agent_id> · T-n" (§B1); `blocked` ("Waiting on you") only after the request is escalated to the user |
+| T11 | in_progress | worker `work` job ends after an ok `request_help` | blocked (`help`) | — | `help_agent_id` = `routed_to` of the job's last ok `request_help` (`director` or a peer). Enqueue a `help` job for `help_agent_id` (priority 60), in the same `finishAttempt` txn as MVP. Asker presence: `idle`, detail "Waiting on <help_agent_id> · T-n" (§B1); `blocked` ("Waiting on you") only while `helpEscalatedToUser(task)` (§T5.1) |
 | T11b (new) | blocked (`help`) | peer `help` job ends J5 after an ok `request_help` (escalation) | blocked (`help`) | caller is `help_agent_id` | `help_agent_id = 'director'`; enqueue director `help`; event `task.updated {help_agent_id}` |
 | T11c (new) | blocked (`help`), `help_agent_id` = a peer whose `help` job is still `queued` | user `reroute_help` (`POST /api/tasks/:id {action:'reroute_help'}`); or sweep (`rerouteStalePeerHelp`, same tick as approval expiry) when the job has been queued ≥ 10 min (`now − jobs.created_at ≥ 600 000 ms` on the peer `help` job) or the peer is disabled (retire is A6) | blocked (`help`) | kill not engaged (sweep only); peer job not `running` (else `409 help_running`) | in one txn: `help_agent_id = 'director'`; cancel the peer's queued `help` job (`failure_kind='cancelled'`, no help-end: the task no longer waits on that agent); enqueue director `help` (priority 60); system line "<peer> can't answer now (<queueReason>); asking the director instead."; `task.updated {help_agent_id}` |
 | T16 | blocked | as MVP; plus peer `post_message {wake:true}` mentioning the assignee by the task's `help_agent_id` (reason `help` only) | `resumeTarget` | director or the current helper may trigger T16 only for reason `help` | as MVP. When leaving `blocked`: `help_agent_id = NULL` and cancel queued `help` jobs of the task (`failure_kind='cancelled'`; help-end rule does not fire because the task is no longer `blocked/help`). Case 0 (Retry after help failed) sets `help_agent_id = 'director'`: **a failed peer help is never retried on the peer** |
@@ -527,7 +534,8 @@ for b in SELECT agent_id, limit_usd, limit_jobs FROM budgets WHERE scope='agent'
 - `queueReason(agent)` evaluates the same predicates one by one for the UI (§B1), in this order: `disabled`, `busy (running T-n)` (one-running-per-agent), `run slots n/max`, `director slot reserved`, `daily budget` / `job cap` (global), `agent budget` (either `@agentRoom` predicate), `thread capped`. First failing predicate wins.
 - `refreshPresence` sets `paused` with detail `agent budget` when the agent has a queued job, no running job, and fails only the per-agent predicate.
 - `budget.hit {scope:'agent', agent}` is emitted once per agent per day as a `budget.hit` event (existing type), in the same txn as the §B1 budget-hit system line (thread of the agent's first queued job's task).
-- `refreshPresence` for an agent with no running and no queued job and a task `blocked/help` with `help_agent_id` set: `idle`, detail `waiting on <help_agent_id> · T-n`; `blocked` only when that task's help request was escalated to the user (§B1).
+- **`helpEscalatedToUser(task)`** (`lib/domain/tasks.ts`, the single definition used by the card line, `refreshPresence` and bootstrap): true iff the task is `blocked/help` and the newest `kind='help'` message in the task thread with `created_at ≥ entered` has `'user'` in `mentions`, where `entered` = the latest `ts` of the task's `task.status_changed {to:'blocked', reason:'help'}` or `task.updated {blocked_reason:'help'}` (Retry case 0) event. Help messages from before the current blocked/help episode never count.
+- `refreshPresence` for an agent with no running and no queued job and a task `blocked/help` with `help_agent_id` set: `blocked` (detail "waiting on you") if `helpEscalatedToUser(task)`, else `idle`, detail `waiting on <help_agent_id> · T-n`.
 
 One running job per agent (`jobs_one_running_per_agent`) is unchanged. It still guarantees a single process per agent cwd and session. Parallelism comes only from having more agents.
 
@@ -570,7 +578,7 @@ These need no logic change. `killAll` already covers every child, `procTargets` 
 | `GET /api/artifacts/:id/compare?from=<artifactId>` | both artifacts must belong to the same task (`400 wrong_task`). Runs `git diff --no-color <from.head_commit> <this.head_commit>` (TECH §4 git wrapper, read-only) outside any txn. Output is capped at 2,000 lines (`truncated`) and is not cached. Missing object → `409 compare_unavailable` |
 | `POST /api/artifacts/:id/comments` `{path, line, side, body}` | user comment, one IMMEDIATE txn: artifact is the task's latest non-superseded artifact and task status ∈ {`in_review`,`blocked`,`todo`}, else `409 comments_closed` (hint names the reason); `line_not_in_diff` check (§T6.4), `INSERT notes(author_agent_id NULL, …)`, `note.added`; no job enqueued |
 
-`GET /api/bootstrap.agents` adds `retired_at`, `skill_note`, `queue_reason`, `budget {spent, limit_usd, started, limit_jobs}`, and the help job's asker for presence text.
+`GET /api/bootstrap.agents` adds `retired_at`, `skill_note`, `queue_reason`, `budget {spent, limit_usd, started, limit_jobs}`, and the help job's asker for presence text; `bootstrap.tasks` adds `help_escalated_to_user` (= `helpEscalatedToUser(task)`, §T5.1) for the card line.
 
 ## T6. Tool schemas (TECH §8 delta)
 
@@ -687,7 +695,7 @@ Event `help.requested {routed_to, task_id, options, peer}`. Returns `{ok, messag
   - fresh DB → `user_version = 2`;
   - a v1 DB with rows in every table (incl. 3 `tool_calls`) → v2 with the same `tool_calls` rows, `PRAGMA foreign_key_check` empty, `journal_mode = wal`, `foreign_keys = 1`;
   - running `migrate()` twice is a no-op;
-  - v1 `blocked/help` and help-failed `blocked/job_failed` tasks → `help_agent_id = 'director'`; a work-failed `blocked/job_failed` task (newest finished job is `work`) and other tasks stay NULL;
+  - v1 `blocked/help` and help-failed `blocked/job_failed` tasks → `help_agent_id = 'director'`; a work-failed `blocked/job_failed` task (newest failed/killed/cancelled job is `work`, even if a later help job succeeded) and other tasks stay NULL;
   - `test/migrations/validate_v2.py` (§T1) runs against the DDL block in this doc; CI/release runs it with `python3 -I test/migrations/validate_v2.py <repo>` and requires `OK: migration 2 validated`.
 - **Triggers:**
   - 4th active worker → `worker_cap`, while a 4th after retiring one is ok;
@@ -705,7 +713,8 @@ Event `help.requested {routed_to, task_id, options, peer}`. Returns `{ok, messag
   - approve at the cap → `409 worker_cap`, approval still pending;
   - a stored payload with `daily_usd = 0.5` or `model = 'opus'` (inserted directly) → `400 invalid_payload`, nothing created, approval still pending;
   - approve enqueues exactly one director `respond` job in the approval's thread and returns `resumed` = its id; reject/expire enqueue none;
-  - approve with the origin thread at its cap (or closed) → agent created, approval `consumed`, zero director jobs, response `resumed: null, reason: 'thread_capped'` (`'thread_closed'`), system line "…Director not woken: thread capped." (e2e: toast shows [Raise cap] / [Reopen thread]).
+  - approve with the origin thread at its cap (or closed) → agent created, approval `consumed`, zero director jobs, response `resumed: null, reason: 'thread_capped'` (`'thread_closed'`), system line "writer2 added. Director not woken: thread capped. Raise the cap or reopen, then reply in the thread to wake it." (e2e: toast shows [Raise cap] only when `cap_raises = 0`, none when `cap_raises = 1`; [Reopen thread] when closed);
+  - capped origin thread (`cap_raises = 0`) → approve → no director job; raise cap → still zero director jobs, composer hint "Will wake director"; user reply → exactly one director `respond` job.
 - **Retire (A6):** open task plus a queued `respond` job → `409 agent_has_open_tasks` and the queued job is still `queued`; running job → `agent_busy`, nothing cancelled; ok path cancels queued jobs and retires in one txn.
 - **Claim:**
   - (i) with `max_concurrency = 3`, 3 queued worker jobs on 3 workers plus a queued director job → 2 workers and the director run;
@@ -727,6 +736,7 @@ Event `help.requested {routed_to, task_id, options, peer}`. Returns `{ok, messag
   - T11 to a peer → `help_agent_id`, one peer help job queued, asker presence `idle` with detail "Waiting on <peer> · T-n" (not `blocked`; `blocked` only after a director escalation to the user); T11b; T16 by peer wake; T16 by director wake while the peer help job is queued → that job cancelled, no help-end;
   - help-end for a peer on J12, J10, J15, J4 and `no_handoff` → `blocked/job_failed`, `helpFailed`, Retry → director `help` with `help_agent_id = 'director'`;
   - user reply → `todo` + `work`;
+  - `helpEscalatedToUser`: a task escalated to the user (director `request_help` → user), answered, later blocked again on a peer request → asker `idle`, "Waiting on <peer> · T-n", card "Blocked: waiting on <peer> (help)"; director `help` job escalates to the user in the current episode → asker `blocked`, card "Blocked: waiting on you (help)";
   - T11c: peer help job queued ≥ 10 min (clock advanced) → `help_agent_id = 'director'`, peer job `cancelled`, no help-end, one director `help` job; peer disabled → same on the next sweep; user `reroute_help` → same immediately; peer job `running` → `409 help_running`; kill engaged → sweep does nothing;
   - comment delivery: user comment while `todo` → in the next work job's `job.started.review_note_ids`; comment route while `in_progress`, on an older artifact, or on `done` → `409 comments_closed`; delivery state `closed` after `done` without a work run;
   - R1 reassign moves the queued `work` job; reassign of an approved agent top-level task → `approved_task_immutable`; reassign of a `blocked/help` task (peer or director helper) → `409 help_pending`, nothing changed, the help job still queued; reassign of a `blocked/job_failed` task to its `help_agent_id` → `409 assignee_is_helper`;
@@ -759,7 +769,8 @@ The argv and env assertions are unchanged and also run for help jobs. They add o
 - the agents list renders 3 workers with distinct presences and queue reasons;
 - the spawn card checkbox raises `max_concurrency`, and the `settings.changed` event is present;
 - axe passes on the agents list, the spawn card and the diff view (both modes, with comments open);
-- keyboard-only run: open the diff with `d`, `n` ×2, `c`, type, `Ctrl+Enter`, `v`, `Esc`, with the assertion that focus returns to the invoking element each time.
+- keyboard-only run: open the diff with `d`, `n` ×2, `c`, type, `Ctrl+Enter`, `v`, `Esc`, with the assertion that focus returns to the invoking element each time; plus side anchoring: unified `c` on a `−` line saves `side='old'` and on a context line `'new'`; side by side `←`/`→` then `c` saves the focused side, a padded cell is skipped with "no line on this side", and the textarea label reads "Comment on old line <n> of <path>";
+- agents list keyboard: `j`/`k` move between row buttons, `Tab` reaches [Edit budget] after its row button, `Enter` opens the §B1 destination (running task-less job → its thread; idle "Waiting on writer2 · T-7" → T-7), "Retired (n)" toggles `aria-expanded`.
 
 **Manual real-binary smoke (release gate, extends TECH §11):**
 - migration validator green: `python3 -I test/migrations/validate_v2.py /home/user/Slackboard` prints `OK: migration 2 validated` against the final DDL block;

@@ -1,5 +1,6 @@
 # Phase 2 migration validator (referenced from docs/PHASE2.md §T1 and §T9; release gate).
 # Round 3 version (tasks 11/13, jobs 21-23) executed green: sqlite 3.53.1 / OK: migration 2 validated.
+# Round 4 version (incl. task 14 / jobs 24-25) executed green: sqlite 3.53.1 / OK: migration 2 validated.
 """Validate docs/PHASE2.md MIGRATION 2 against lib/db/schema.ts SCHEMA_SQL.
 Usage: python3 -I validate_v2.py /home/user/Slackboard
 """
@@ -49,7 +50,7 @@ for i in range(3):
 db.execute("INSERT INTO artifacts(task_id, review_cycle, review_round, base_commit, head_commit, diff_path, files, lines_added, lines_removed, created_at) VALUES (1,0,1,'a','b','/x', ?, 1, 0, 1)",
            (json.dumps([{'path': 'docs/A.md', 'added': 1, 'removed': 0}]),))
 # v1 blocked tasks (explicit ids so later fixtures keep ids 1..n)
-for tid, reason in ((10, 'help'), (11, 'job_failed'), (12, 'killed'), (13, 'job_failed')):
+for tid, reason in ((10, 'help'), (11, 'job_failed'), (12, 'killed'), (13, 'job_failed'), (14, 'job_failed')):
     # tasks.thread_id is UNIQUE: each fixture task gets its own thread (explicit ids keep later thread ids unchanged)
     db.execute("INSERT INTO threads(id, channel_id, title, created_by_kind, created_at) VALUES (?,1,'b','user',1)", (tid,))
     db.execute("INSERT INTO tasks(id,title,status,blocked_reason,assignee_agent_id,thread_id,created_by_kind,created_at,updated_at) VALUES (?,'b','blocked',?,'worker',?,'user',1,1)", (tid, reason, tid))
@@ -61,13 +62,18 @@ ins_job = ("INSERT INTO jobs(id, agent_id, kind, thread_id, task_id, status, fai
 db.execute(ins_job, (21, 'director', 'help', 11, 11, 0.3, 2))
 db.execute(ins_job, (22, 'director', 'help', 13, 13, 0.3, 2))
 db.execute(ins_job, (23, 'worker', 'work', 13, 13, 1.0, 3))
+#   task 14 (Round 4, ENG-9): older failed work job, then a newer *succeeded* director help -> stays NULL
+#   (only failed/killed/cancelled jobs count, matching helpFailed)
+db.execute(ins_job, (24, 'worker', 'work', 14, 14, 1.0, 2))
+db.execute("INSERT INTO jobs(id, agent_id, kind, thread_id, task_id, status, run_after, budget_cap_usd, created_at, finished_at) "
+           "VALUES (25,'director','help',14,14,'succeeded',1,0.3,1,3)")
 db.execute('PRAGMA user_version = 1')
 
 tx(mig)
 assert db.execute('PRAGMA user_version').fetchone()[0] == 2
 # help_agent_id backfill: blocked/help, or help-failed blocked/job_failed (helpFailed predicate); v1 help always went to the director
-assert db.execute('SELECT id, help_agent_id FROM tasks WHERE id IN (1,10,11,12,13) ORDER BY id').fetchall() == \
-    [(1, None), (10, 'director'), (11, 'director'), (12, None), (13, None)]
+assert db.execute('SELECT id, help_agent_id FROM tasks WHERE id IN (1,10,11,12,13,14) ORDER BY id').fetchall() == \
+    [(1, None), (10, 'director'), (11, 'director'), (12, None), (13, None), (14, None)]
 assert db.execute('SELECT count(*) FROM tool_calls').fetchone()[0] == 3
 assert db.execute('PRAGMA foreign_key_check').fetchall() == []
 assert db.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
