@@ -117,7 +117,7 @@ export function spawnJob(ctx: SpawnCtx, j: JobRow, token: string): void {
         db.prepare(`UPDATE jobs SET session_started=1, last_output_at=? WHERE id=?`).run(now(), j.id);
         if (c.state.init!.session_id && c.state.init!.session_id !== j.session_id) console.warn(`[orch] job ${j.id}: init session_id differs from argv`);
         const missing = expected.filter((e) => !c.state.init!.tools.includes(e));
-        if (missing.length) { c.failure = 'tools_missing'; c.killedFor ??= null; killGroup(pid, 'SIGTERM'); }
+        if (missing.length) { c.failure = 'tools_missing'; terminateChild(c, ctx.tokens); }
       } else if (ev === 'tool_use' && now() - c.lastOutputEvent > 2000) {
         c.lastOutputEvent = now();
         db.prepare(`UPDATE agents SET presence_detail=? WHERE id=?`).run(c.state.lastToolUse?.replace(ss.mcp_tool_prefix, '') ?? null, j.agent_id);
@@ -144,8 +144,21 @@ export function spawnJob(ctx: SpawnCtx, j: JobRow, token: string): void {
   });
 }
 
-export function killChild(c: Child, why: NonNullable<Outcome['killedFor']>, tokens: SpawnCtx['tokens']): void {
-  c.killedFor ??= why; tokens.revokeJob(c.jobId);
+/** Revoke the job token, SIGTERM the group, SIGKILL after 3 s. Does not touch killedFor/failure. */
+export function terminateChild(c: Pick<Child, 'jobId' | 'pid'>, tokens: SpawnCtx['tokens'], grace = 3000): void {
+  tokens.revokeJob(c.jobId);
   killGroup(c.pid, 'SIGTERM');
-  setTimeout(() => killGroup(c.pid, 'SIGKILL'), 3000).unref();
+  setTimeout(() => killGroup(c.pid, 'SIGKILL'), grace).unref();
+}
+
+export function killChild(c: Child, why: NonNullable<Outcome['killedFor']>, tokens: SpawnCtx['tokens']): void {
+  c.killedFor ??= why;
+  terminateChild(c, tokens);
+}
+
+/** Kill-switch precedence (F4): 'kill' overrides an earlier timeout_*, lease_lost or shutdown mark; cancelled stays. */
+export function markKilled(c: Pick<Child, 'killedFor'>, why: 'kill' | 'shutdown'): void {
+  const k = c.killedFor;
+  if (why === 'kill' && (!k || k.startsWith('timeout_') || k === 'lease_lost' || k === 'shutdown')) c.killedFor = 'kill';
+  else c.killedFor ??= why;
 }

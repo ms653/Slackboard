@@ -11,8 +11,8 @@ import { expireApprovals, setStatus } from '@/lib/domain/tasks';
 import { getTask } from '@/lib/domain/rounds';
 import { procStart, isOurs, killJobProcs, procTargets, sweepByMarker, killGroup, setArgvFallback, groupAlive } from '@/lib/proc';
 import { startToolServer, Tokens } from './toolserver';
-import { spawnJob, killChild, type Child, type SpawnCtx } from './spawn';
-import { runDoctor, binSignature } from './doctor';
+import { spawnJob, killChild, markKilled, type Child, type SpawnCtx } from './spawn';
+import { runDoctor, binSignature, killDoctorProbes } from './doctor';
 
 const HEARTBEAT_MS = 15_000, IDLE_MS = Number(process.env.SB_IDLE_MS || 180_000);
 const WALL: Record<string, number> = { respond: 240_000, help: 240_000, review: 360_000, work: 900_000 };
@@ -58,7 +58,7 @@ function tick(): void {
   try {
     const s = db.prepare(`SELECT * FROM system_state WHERE id=1`).get() as any;
     db.prepare(`UPDATE system_state SET orchestrator_heartbeat_at=? WHERE id=1`).run(now());
-    if (s.kill_switch) { if (children.size && !killing) { killing = true; killAll('kill').finally(() => { killing = false; }); } return; }
+    if (s.kill_switch) { if (children.size && !killing) { killing = true; killAll('kill').catch((e) => log('killAll error', e?.message)).finally(() => { killing = false; }); } return; }
     const cancels = db.prepare(`SELECT j.id FROM jobs j LEFT JOIN tasks k ON k.id=j.task_id WHERE j.status='running' AND j.lease_owner=?
                                 AND (j.cancel_requested=1 OR k.status='cancelled')`).all(ME) as { id: number }[];
     for (const r of cancels) { const c = children.get(r.id); if (c && !c.killedFor) killChild(c, 'cancelled', tokens); }
@@ -113,7 +113,10 @@ async function sweep(): Promise<void> {
 async function killAll(why: 'kill' | 'shutdown'): Promise<number[]> {
   const list = [...children.values()];
   tokens.revokeAll();
-  for (const c of list) { c.killedFor ??= why; killGroup(c.pid, 'SIGTERM'); }
+  for (const c of list) {
+    markKilled(c, why);      // kill switch wins over an earlier timeout_*/lease_lost (TECH §3.2)
+    killGroup(c.pid, 'SIGTERM');
+  }
   await new Promise((r) => setTimeout(r, 3000));
   for (const c of list) if (groupAlive(c.pid)) killGroup(c.pid, 'SIGKILL');
   await new Promise((r) => setTimeout(r, 2000));
@@ -141,7 +144,21 @@ async function doctor(force = false): Promise<void> {
   } finally { doctorRunning = false; refreshAllPresence(db); }
 }
 
+const timers: NodeJS.Timeout[] = [];
+function installSignalHandlers(): void {
+  for (const sig of ['SIGINT', 'SIGTERM'] as const) process.on(sig, async () => {
+    if (shuttingDown) return;
+    shuttingDown = true; timers.forEach(clearInterval);
+    log(`${sig}: stopping children`);
+    killDoctorProbes();
+    try { await killAll('shutdown'); } catch (e: any) { log('killAll error', e?.message); }   // close handlers requeue them (J11 orphaned); anything left is recovered at next boot
+    await new Promise((r) => setTimeout(r, 300));
+    process.exit(0);
+  });
+}
+
 async function boot(): Promise<void> {
+  installSignalHandlers();               // before recoverOrphans/doctor so a signal during probes still cleans up
   ensureDir(dataDir());
   acquireSingleton();
   await recoverOrphans();
@@ -150,7 +167,7 @@ async function boot(): Promise<void> {
   if (!control) { control = randomToken(); fs.writeFileSync(paths.controlToken(), control, { mode: 0o600 }); }
   const server = await startToolServer({ db, tokens, controlToken: control, onControl: async (p, body) => {
     if (p === 'wake') { setImmediate(tick); return {}; }
-    if (p === 'kill') { killAll('kill'); return { accepted: true }; }   // survivors arrive in the kill.engaged follow-up event
+    if (p === 'kill') { killAll('kill').catch((e) => log('killAll error', e?.message)); return { accepted: true }; }   // survivors arrive in the kill.engaged follow-up event
     if (p === 'cancel') { const c = children.get(Number(body.job_id)); if (c) killChild(c, 'cancelled', tokens); return {}; }
     if (p === 'doctor') { doctor(true); return { started: true }; }
     return { ok: false };
@@ -162,15 +179,7 @@ async function boot(): Promise<void> {
   emit(db, 'orchestrator.started', 'system', 'system', 1, { me: ME, port: toolPort });
   refreshAllPresence(db);
   log(`started ${ME}, tool server 127.0.0.1:${toolPort}, data ${dataDir()}`);
-  const timers = [setInterval(tick, 1000), setInterval(heartbeat, HEARTBEAT_MS), setInterval(sweep, 5000)];
-  for (const sig of ['SIGINT', 'SIGTERM'] as const) process.on(sig, async () => {
-    if (shuttingDown) return;
-    shuttingDown = true; timers.forEach(clearInterval);
-    log(`${sig}: stopping children`);
-    await killAll('shutdown');               // close handlers requeue them (J11 orphaned); anything left is recovered at next boot
-    await new Promise((r) => setTimeout(r, 300));
-    process.exit(0);
-  });
+  timers.push(setInterval(tick, 1000), setInterval(heartbeat, HEARTBEAT_MS), setInterval(sweep, 5000));
 }
 
 boot().catch((e) => { console.error(e); process.exit(1); });

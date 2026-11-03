@@ -24,6 +24,10 @@ export function binSignature(bin: string): string {
   try { const st = fs.statSync(p); return `${p}:${st.mtimeMs}`; } catch { return 'missing'; }
 }
 
+/** Live doctor probe child pids, so a signal during doctor can kill them (F2). */
+export const liveProbePids = new Set<number>();
+export function killDoctorProbes(): void { for (const pid of liveProbePids) { try { killGroup(pid, 'SIGKILL'); } catch {} } liveProbePids.clear(); }
+
 async function probe(bin: string, port: number, tokens: Tokens, prompt: string, extraAllowed: string[], sep: string, prefix: string,
                      watchArgv: boolean): Promise<{ s: ParseState; code: number | null; pid?: number; startOk: boolean; argvSeen: boolean; calls: unknown[] }> {
   const dir = ensureDir(path.join(paths.doctorDir(), crypto.randomBytes(6).toString('hex')));
@@ -43,7 +47,7 @@ async function probe(bin: string, port: number, tokens: Tokens, prompt: string, 
     try { p = spawn(bin, args, { cwd: dir, detached: true, stdio: ['ignore', 'pipe', 'pipe'], env: childEnv() }); }
     catch { return resolve({ s, code: -1, startOk: false, argvSeen: false, calls }); }
     if (!p.pid) { p.on('error', () => resolve({ s, code: -1, startOk: false, argvSeen: false, calls })); return; }
-    dt.bind(p.pid);
+    dt.bind(p.pid); liveProbePids.add(p.pid);
     const startOk = procStart(p.pid) !== null;
     let argvSeen = false;
     const iv = watchArgv ? setInterval(() => { if (pidsByArgv(session, bin).includes(p!.pid!)) argvSeen = true; }, 50) : null;
@@ -51,7 +55,7 @@ async function probe(bin: string, port: number, tokens: Tokens, prompt: string, 
     p.stdout!.on('data', (d) => { buf += d; let i; while ((i = buf.indexOf('\n')) >= 0) { parseLine(s, buf.slice(0, i)); buf = buf.slice(i + 1); } });
     p.stderr!.on('data', () => {});
     const timer = setTimeout(() => killGroup(p!.pid!, 'SIGKILL'), 120_000);
-    p.on('close', (code) => { clearTimeout(timer); if (iv) clearInterval(iv); if (buf) parseLine(s, buf);
+    p.on('close', (code) => { liveProbePids.delete(p!.pid!); clearTimeout(timer); if (iv) clearInterval(iv); if (buf) parseLine(s, buf);
       fs.rmSync(dir, { recursive: true, force: true }); resolve({ s, code, pid: p!.pid, startOk, argvSeen, calls }); });
   });
 }

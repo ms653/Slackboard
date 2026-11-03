@@ -94,12 +94,13 @@ export function finishAttempt(db: DB, jobId: number, o: Outcome, expectedOwner: 
   const ss = db.prepare(`SELECT kill_switch, pause_reason FROM system_state WHERE id=1`).get() as { kill_switch: number; pause_reason: string | null };
   const c = classify(db, j, o, ss.kill_switch === 1);
   const t = now();
-  const cost = o.result?.total_cost_usd ?? 0;
+  const estimated = !o.result;                                   // no result: charge the reserved cap as a conservative estimate
+  const cost = o.result ? o.result.total_cost_usd ?? 0 : j.budget_reserved_usd ?? 0;
   const subtype = o.result?.subtype ? (SUBTYPES.includes(o.result.subtype) ? o.result.subtype : 'error_during_execution') : null;
   db.prepare(`UPDATE jobs SET cost_usd = cost_usd + ?, num_turns = ?, result_subtype = ?, exit_code = ?, error = ?,
               permission_denials = permission_denials + ? WHERE id = ?`)
     .run(cost, o.result?.num_turns ?? null, subtype, o.exitCode ?? null, o.error?.slice(0, 2000) ?? null, o.permissionDenials ?? 0, j.id);
-  emit(db, 'job.attempt_finished', 'system', 'job', j.id, { cost_usd: cost, num_turns: o.result?.num_turns ?? null, subtype, rule: c.rule }, j.id);
+  emit(db, 'job.attempt_finished', 'system', 'job', j.id, { cost_usd: cost, num_turns: o.result?.num_turns ?? null, subtype, rule: c.rule, ...(estimated ? { estimated_from_cap: true } : {}) }, j.id);
   const task = j.task_id ? getTask(db, j.task_id) : undefined;
 
   if (c.status === 'queued') {

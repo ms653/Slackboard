@@ -47,7 +47,7 @@ export function startToolServer(deps: ToolServerDeps): Promise<http.Server> {
         const ppid = Number(req.headers['x-sb-parent-pid']);
         if (!live) return json(res, 401, { ok: false, error: 'unauthorized', hint: 'run token revoked or unknown' });
         if (live.jobId === null) {                                     // doctor mode
-          if (live.doctorPid !== undefined && live.doctorPid !== ppid) return json(res, 401, { ok: false, error: 'unauthorized' });
+          if (live.doctorPid === undefined || live.doctorPid !== ppid) return json(res, 401, { ok: false, error: 'unauthorized' });
           const names = allowedTools({ role: 'director', kind: 'respond' });
           if (url === '/tools') return json(res, 200, { ok: true, tools: names.map((n) => ({ name: n, ...TOOL_SCHEMAS[n] })) });
           if (body.tool !== 'add_note') return json(res, 200, { ok: false, error: 'not_allowed_for_role', hint: 'doctor probe' });
