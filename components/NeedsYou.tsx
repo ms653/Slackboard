@@ -105,7 +105,7 @@ export function NeedsYou() {
         <ActionButton label="Close thread" run={() => act(() => api(`/api/threads/${th.id}`, { body: { action: 'close' } }), tk ? `Thread closed. T-${tk.id} is waiting.` : 'Thread closed')} /></>;
     }
     return (
-      <li key={n.key} className="border-b border-slate-700 p-4">
+      <li key={n.key} tabIndex={0} className="border-b border-slate-700 p-4 focus:outline focus:outline-2 focus:outline-sky-400">
         <div className="flex justify-between text-xs text-slate-400 mb-1">
           <span className="font-semibold text-slate-200"><span aria-hidden>{icon}</span> {label}{n.approval && n.approval.kind === 'create_top_level_task' ? ' · New task' : ''}</span>
           <span>{n.approval ? `from ${n.approval.requested_by_agent_id} · ` : ''}{ago(n.created_at, boot.now)}</span>

@@ -17,7 +17,19 @@ const procs = [
   spawn(process.execPath, [path.join(repo, 'node_modules/next/dist/bin/next'), 'start', '-H', '127.0.0.1', '-p', port], { cwd: repo, env, stdio: 'inherit' }),
 ];
 console.log(`Slackboard: http://127.0.0.1:${port}`);
-let stopping = false;
-const stop = (code = 0) => { if (stopping) return; stopping = true; for (const p of procs) p.kill('SIGTERM'); setTimeout(() => process.exit(code), 4000).unref(); };
-for (const p of procs) p.on('exit', (c) => { if (!stopping) { console.error(`${p === procs[0] ? 'orchestrator' : 'next'} exited (${c}); stopping`); stop(c ?? 1); } });
+let stopping = false, stopCode = 0;
+const exited = new Set();
+const stop = (code = 0) => {
+  if (stopping) return; stopping = true;
+  for (const p of procs) if (!exited.has(p)) p.kill('SIGTERM');
+  stopCode = code;
+  setTimeout(() => process.exit(code), 12000).unref();   // orchestrator teardown takes ~5.5 s
+  if (exited.size === procs.length) process.exit(code);
+
+};
+for (const p of procs) p.on('exit', (c) => {
+  exited.add(p);
+  if (!stopping) { console.error(`${p === procs[0] ? 'orchestrator' : 'next'} exited (${c}); stopping`); stop(c ?? 1); }
+  else if (exited.size === procs.length) process.exit(stopCode);
+});
 process.on('SIGINT', () => stop()); process.on('SIGTERM', () => stop());

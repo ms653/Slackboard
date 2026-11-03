@@ -60,7 +60,7 @@ export function TaskCard({ t, now }: { t: any; now: number }) {
     <div className="flex justify-end gap-2"><button className="btn bg-slate-700" onClick={() => setDlg(null)}>Keep</button>
       <ActionButton label="Cancel task" kind="danger" run={async () => { await post('cancel'); setDlg(null); toast(`T-${t.id} cancelled`); }} /></div></Dialog>)]);
   return (
-    <li aria-label={name} tabIndex={0} className="bg-slate-800 border border-slate-700 rounded p-2 text-sm focus:outline focus:outline-2 focus:outline-sky-400 cursor-pointer"
+    <li aria-label={name} data-task-card={t.id} tabIndex={0} className="bg-slate-800 border border-slate-700 rounded p-2 text-sm focus:outline focus:outline-2 focus:outline-sky-400 cursor-pointer"
       onClick={() => open({ kind: 'task', id: t.id })}
       onKeyDown={(e) => { if (e.key === 'Enter') open({ kind: 'task', id: t.id }); if (e.key === 'm' && moves.length) { e.preventDefault(); setMenu(true); } }}>
       <div className="flex justify-between gap-2 text-xs"><span className="font-mono">T-{t.id}</span><TaskStatus s={t.status} />{t.round && <span className="text-slate-400">{t.round}</span>}</div>

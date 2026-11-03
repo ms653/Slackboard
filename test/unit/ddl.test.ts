@@ -1,5 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { openDb } from '@/lib/db';
+import { tx } from '@/lib/db';
+import { createTask } from '@/lib/domain/tasks';
 import { freshEnv, userTask } from './helpers';
 
 describe('DDL and triggers (TECH §11)', () => {
@@ -44,5 +46,15 @@ describe('DDL and triggers (TECH §11)', () => {
     const db = freshEnv();
     expect(() => db.prepare(`UPDATE system_state SET pause_reason='user', paused_until=5`).run()).toThrow();
     expect(() => db.prepare(`UPDATE system_state SET pause_reason='usage_limit', paused_until=NULL`).run()).toThrow();
+  });
+  it('approval gates: proposed->todo needs an approved approval; decided_by agent and pending->consumed abort', () => {
+    const db = freshEnv();
+    const { task_id, approval_id } = tx(db, () => createTask(db, { title: 'p', description: 'd', acceptance: '1', by: { kind: 'agent', agent: 'director' } })) as any;
+    expect(db.prepare(`SELECT status FROM tasks WHERE id=?`).get(task_id)).toEqual({ status: 'proposed' });
+    expect(() => db.prepare(`UPDATE tasks SET status='todo' WHERE id=?`).run(task_id)).toThrow(/approval_required/);
+    expect(() => db.prepare(`UPDATE approvals SET status='approved', decided_by='agent', decided_at=1 WHERE id=?`).run(approval_id)).toThrow(/CHECK/);
+    expect(() => db.prepare(`UPDATE approvals SET status='consumed', decided_by='user', decided_at=1, consumed_at=1 WHERE id=?`).run(approval_id)).toThrow(/illegal_approval_transition/);
+    db.prepare(`UPDATE approvals SET status='approved', decided_by='user', decided_at=1 WHERE id=?`).run(approval_id);
+    expect(() => db.prepare(`UPDATE tasks SET status='todo' WHERE id=?`).run(task_id)).not.toThrow();
   });
 });

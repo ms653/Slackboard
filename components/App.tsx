@@ -6,6 +6,9 @@ import { Sidebar } from './Sidebar';
 import { NeedsYou } from './NeedsYou';
 import { Board, Chat, Settings } from './Views';
 import { RightPane } from './RightPane';
+import { api } from './api';
+import { Presence } from './ui';
+import { PAUSE_LABEL } from './Header';
 
 const VIEWS: [View, string, string][] = [['inbox', 'Needs you', 'g i'], ['chat', 'Chat', 'g c'], ['board', 'Board', 'g b']];
 
@@ -34,7 +37,7 @@ function useLive() {
 }
 
 function useKeys(setHelp: (b: boolean) => void) {
-  const { setView, close, panes, set } = useStore();
+  const { setView, close, panes, set, open, toast } = useStore();
   const g = useRef(0);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -49,10 +52,26 @@ function useKeys(setHelp: (b: boolean) => void) {
       }
       if (e.key === '/') { e.preventDefault(); (document.querySelector('[data-composer]') as HTMLElement | null)?.focus(); }
       if (e.key === '?') setHelp(true);
+      if ((e.key === 'a' || e.key === 'r' || e.key === 'd') && !document.querySelector('[role="dialog"]')) {
+        const focused = document.activeElement as HTMLElement | null;
+        const btn = (root: ParentNode | null | undefined) => root?.querySelector<HTMLButtonElement>(`button[data-shortcut="${e.key}"]:not(:disabled)`) ?? null;
+        const card = focused?.closest<HTMLElement>('[data-task-card]');
+        if (e.key === 'd' && card) {
+          e.preventDefault();
+          const id = Number(card.dataset.taskCard);
+          api(`/api/tasks/${id}`).then((r: any) => {
+            const art = (r.artifacts ?? []).filter((a: any) => a.verdict !== 'superseded').slice(-1)[0];
+            if (art) open({ kind: 'review', id: art.id }); else toast(`T-${id} has no diff yet`);
+          }, () => toast(`Couldn't load T-${id}`, 'error'));
+          return;
+        }
+        const target = btn(focused?.closest('li[tabindex="0"]')) ?? btn(document.querySelector('aside[aria-label="Detail"]'));
+        if (target) { e.preventDefault(); target.click(); }
+      }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [setView, close, panes.length, set, setHelp]);
+  }, [setView, close, panes.length, set, setHelp, open, toast]);
 }
 
 export default function App() {
@@ -85,6 +104,11 @@ export default function App() {
           <button key={v} role="tab" aria-selected={view === v} className={`flex-1 py-2 text-sm ${view === v ? 'bg-slate-700' : ''}`} onClick={() => setView(v)}>
             {v === 'inbox' ? `Inbox (${boot.needsYou.length})` : l}</button>)}
       </div>
+      <ul aria-label="Agents" className="md:hidden flex flex-wrap gap-x-4 gap-y-1 px-3 py-1.5 border-b border-slate-700 text-xs">
+        {boot.agents.map((a: any) => <li key={a.id} className="flex items-center gap-1.5"><span className="font-medium">{a.display_name}</span>
+          <Presence a={a} now={now} pauseLabel={PAUSE_LABEL[boot.system.blocked_by] ?? undefined} />
+          {a.presence === 'working' && a.presence_detail ? <span className="text-slate-400 truncate max-w-[10rem]">{a.presence_detail}</span> : null}</li>)}
+      </ul>
       <div className="flex-1 flex min-h-0">
         <Sidebar now={now} />
         <main id="main" className="flex-1 min-w-0 flex flex-col">
@@ -120,7 +144,7 @@ export default function App() {
           <div className="bg-slate-800 rounded-lg p-5 text-sm" onClick={(e) => e.stopPropagation()}>
             <h2 id="help-h" className="font-semibold mb-2">Keyboard shortcuts</h2>
             <table><tbody>{[['g i / g c / g b / g s', 'Needs you / Chat / Board / Settings'], ['/', 'Focus composer'], ['Enter', 'Open focused card'],
-              ['m', 'Move focused card (legal targets only)'], ['Esc', 'Close pane or dialog'], ['Ctrl+Shift+K', 'Kill switch'], ['?', 'This help']].map(([k, d]) =>
+              ['m', 'Move focused card (legal targets only)'], ['a / r', 'Approve or Accept / Reject or Reopen (focused inbox item or open review pane)'], ['d', 'View diff (focused board card or open task pane)'], ['Esc', 'Close pane or dialog'], ['Ctrl+Shift+K', 'Kill switch'], ['?', 'This help']].map(([k, d]) =>
               <tr key={k}><td className="pr-4 font-mono">{k}</td><td>{d}</td></tr>)}</tbody></table>
             <button autoFocus className="btn bg-slate-700 mt-3" onClick={() => setHelp(false)}>Close</button>
           </div>

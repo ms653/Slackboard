@@ -35,7 +35,7 @@ export function Presence({ a, now, pauseLabel }: { a: any; now: number; pauseLab
 /** Mutating button: pending label, disabled while in flight, inline role=alert error (UX §8). */
 export function ActionButton(p: {
   label: string; pending?: string; run: () => Promise<unknown>; kind?: 'default' | 'primary' | 'danger';
-  disabled?: boolean; title?: string; onError?: (e: ApiError) => boolean | void; shortcut?: string;
+  disabled?: boolean; title?: string; onError?: (e: ApiError) => boolean | void; shortcut?: string; autoFocus?: boolean;
 }) {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -49,7 +49,7 @@ export function ActionButton(p: {
   };
   return (
     <span className="inline-flex flex-col">
-      <button type="button" title={p.title} disabled={busy || p.disabled} className={`btn ${cls}`} onClick={click}>
+      <button type="button" title={p.title} data-shortcut={p.shortcut} data-autofocus={p.autoFocus ? true : undefined} disabled={busy || p.disabled} className={`btn ${cls}`} onClick={click}>
         {busy ? (p.pending ?? `${p.label}…`) : p.label}
         {p.shortcut && !busy ? <kbd className="ml-1.5 opacity-60 text-[10px]">{p.shortcut}</kbd> : null}
       </button>

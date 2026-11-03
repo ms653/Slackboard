@@ -29,7 +29,7 @@ export function KillDialog({ onClose }: { onClose: () => void }) {
       {result && <p className="text-sm mb-3" aria-live="polite">{result}</p>}
       <div className="flex gap-2 justify-end">
         <button type="button" className="btn bg-slate-700" onClick={onClose}>Cancel</button>
-        <ActionButton label="Stop all" pending="Stopping…" kind="danger" onError={(e) => { setErr(e.hint || e.code); return true; }}
+        <ActionButton label="Stop all" pending="Stopping…" kind="danger" autoFocus onError={(e) => { setErr(e.hint || e.code); return true; }}
           run={async () => {
             const r = await api('/api/kill', { body: {} });
             await refresh();

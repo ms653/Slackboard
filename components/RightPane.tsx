@@ -126,7 +126,7 @@ function TaskPane({ id }: { id: number }) {
   if (card.waiting?.action === 'raise_cap') actions.push(<ActionButton key="rc" label="Raise cap" run={async () => { const r: any = await api(`/api/threads/${t.thread_id}`, { body: { action: 'raise_cap' } }); await refresh();
     toast(r.resumed ? `Cap raised. T-${id} will resume.` : 'Cap raised.'); }} />);
   if (!['done', 'cancelled'].includes(t.status)) actions.push(<ActionButton key="cx" label="Cancel task" kind="danger" run={async () => cancel()} />);
-  if (lastArt) actions.push(<button key="df" className="btn bg-slate-700" onClick={() => open({ kind: 'review', id: lastArt.id })}>View diff <kbd className="opacity-60 text-[10px]">d</kbd></button>);
+  if (lastArt) actions.push(<button key="df" data-shortcut="d" className="btn bg-slate-700" onClick={() => open({ kind: 'review', id: lastArt.id })}>View diff <kbd className="opacity-60 text-[10px]">d</kbd></button>);
   return (
     <PaneShell title={<>T-{t.id} · <TaskStatus s={t.status} /> · assignee: {t.assignee_agent_id}{card.round ? ` · ${card.round}` : ''}</>}
       footer={<div className="p-3 border-t border-slate-700 flex flex-wrap gap-2">{actions}</div>}>

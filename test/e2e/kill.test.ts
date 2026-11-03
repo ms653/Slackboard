@@ -60,4 +60,17 @@ describe('kill switch', () => {
     const req = env.one(`SELECT json_extract(payload,'$.reason') r FROM events WHERE type='job.requeued' AND entity_id=?`, String(j.id));
     expect(req.r).toBe('orphaned');
   });
+
+  it('ENG-1: SIGTERM shutdown starts no new job and leaves no live process group', async () => {
+    env = new Env(hangWorker);
+    const { j } = await startWithHangingWorker(env);
+    env.tx(() => createTask(env.db, { title: 'queued behind', description: '', acceptance: '1', by: { kind: 'user' } }));   // same agent: stays queued while j runs
+    await env.until(() => env.one(`SELECT count(*) n FROM jobs WHERE status='queued'`).n >= 1, 5000, 'queued job');
+    const before = env.one(`SELECT count(*) n FROM events WHERE type='job.started'`).n;
+    await env.stop('SIGTERM');                                  // resolves on orchestrator exit
+    expect(groupAlive(j.pid)).toBe(false);
+    expect(sweepByMarker(j.id)).toEqual([]);
+    expect(env.one(`SELECT count(*) n FROM events WHERE type='job.started'`).n).toBe(before);
+    for (const r of env.q(`SELECT pid FROM jobs WHERE pid IS NOT NULL`)) expect(groupAlive(r.pid)).toBe(false);
+  });
 });

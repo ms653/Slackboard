@@ -23,7 +23,7 @@ const log = (...a: unknown[]) => console.log(new Date().toISOString(), '[orch]',
 const db = openDb();
 const tokens = new Tokens();
 const children = new Map<number, Child>();
-let toolPort = 0, sep = ',', sweeping = false, lastBudgetHit = 0, doctorRunning = false;
+let toolPort = 0, sep = ',', sweeping = false, lastBudgetHit = 0, doctorRunning = false, shuttingDown = false, killing = false;
 const ctx: SpawnCtx = { db, me: ME, children, tokens, toolPort: () => toolPort, bin: BIN, sep: () => sep };
 
 function acquireSingleton(): void {
@@ -54,10 +54,11 @@ async function recoverOrphans(): Promise<void> {
 }
 
 function tick(): void {
+  if (shuttingDown) return;
   try {
     const s = db.prepare(`SELECT * FROM system_state WHERE id=1`).get() as any;
     db.prepare(`UPDATE system_state SET orchestrator_heartbeat_at=? WHERE id=1`).run(now());
-    if (s.kill_switch) { if (children.size) killAll('kill'); return; }
+    if (s.kill_switch) { if (children.size && !killing) { killing = true; killAll('kill').finally(() => { killing = false; }); } return; }
     const cancels = db.prepare(`SELECT j.id FROM jobs j LEFT JOIN tasks k ON k.id=j.task_id WHERE j.status='running' AND j.lease_owner=?
                                 AND (j.cancel_requested=1 OR k.status='cancelled')`).all(ME) as { id: number }[];
     for (const r of cancels) { const c = children.get(r.id); if (c && !c.killedFor) killChild(c, 'cancelled', tokens); }
@@ -79,6 +80,7 @@ function tick(): void {
 }
 
 function heartbeat(): void {
+  if (shuttingDown) return;
   for (const [id, c] of children) {
     const n = db.prepare(`UPDATE jobs SET lease_expires_at=?, heartbeat_at=?, last_output_at=? WHERE id=? AND status='running' AND lease_owner=?`)
       .run(now() + 60_000, now(), c.lastOutputAt, id, ME).changes;
@@ -90,7 +92,7 @@ function heartbeat(): void {
 }
 
 async function sweep(): Promise<void> {
-  if (sweeping) return; sweeping = true;
+  if (shuttingDown || sweeping) return; sweeping = true;
   try {
     tx(db, () => {
       const stale = db.prepare(`SELECT id FROM tasks WHERE status='in_progress' AND claim_expires_at < ?
@@ -160,8 +162,10 @@ async function boot(): Promise<void> {
   emit(db, 'orchestrator.started', 'system', 'system', 1, { me: ME, port: toolPort });
   refreshAllPresence(db);
   log(`started ${ME}, tool server 127.0.0.1:${toolPort}, data ${dataDir()}`);
-  setInterval(tick, 1000); setInterval(heartbeat, HEARTBEAT_MS); setInterval(sweep, 5000);
+  const timers = [setInterval(tick, 1000), setInterval(heartbeat, HEARTBEAT_MS), setInterval(sweep, 5000)];
   for (const sig of ['SIGINT', 'SIGTERM'] as const) process.on(sig, async () => {
+    if (shuttingDown) return;
+    shuttingDown = true; timers.forEach(clearInterval);
     log(`${sig}: stopping children`);
     await killAll('shutdown');               // close handlers requeue them (J11 orphaned); anything left is recovered at next boot
     await new Promise((r) => setTimeout(r, 300));

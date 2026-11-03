@@ -8,8 +8,8 @@ import { groupAlive } from '@/lib/proc';
 let env: Env;
 afterEach(async () => { await env?.stop(); });
 
-describe('S1: request -> proposal -> approval -> work -> review (1 rework) -> done (PRD §5)', () => {
-  it('meets P1-P6 with the fake binary', async () => {
+describe('S1 (P1-P8): request -> proposal -> approval -> work -> review (1 rework) -> done (PRD §5)', () => {
+  it('meets P1-P8 with the fake binary', async () => {
     const started = Date.now();
     env = new Env({
       // P5: injected failure in the director respond job, attempt 1: post, then crash before create_task.
@@ -27,10 +27,45 @@ describe('S1: request -> proposal -> approval -> work -> review (1 rework) -> do
     const th = env.tx(() => createThread(env.db, 'general chat', { kind: 'user' }));
     env.tx(() => postUserMessage(env.db, th, 'Please write INSTALL.md for the project.'));
     const ap = await env.until(() => env.one(`SELECT * FROM approvals WHERE status='pending'`), 30000, 'approval');
-    // P2: no worker job may start before approval
+    // no worker job may start before the approval is decided
     expect(env.one(`SELECT count(*) n FROM events WHERE type='job.started' AND json_extract(payload,'$.agent')='worker'`).n).toBe(0);
     env.tx(() => decideApproval(env.db, ap.id, 'approved'));
-    const approvedAt = Date.now();
+    const task = await env.until(() => env.one(`SELECT * FROM tasks WHERE id=? AND status='done'`, ap.task_id), 60000, 'task done');
+
+    // P1: proposed then the exact status path
+    const created = env.one(`SELECT json_extract(payload,'$.status') s FROM events WHERE type='task.created' AND entity_id=?`, String(task.id)).s;
+    const path = env.q(`SELECT json_extract(payload,'$.to') t FROM events WHERE type='task.status_changed' AND entity_id=? ORDER BY id`, String(task.id)).map((r) => r.t);
+    expect([created, ...path]).toEqual(['proposed', 'todo', 'in_progress', 'in_review', 'todo', 'in_progress', 'in_review', 'done']);
+    // P2: jobs.started_at (worker) > approvals.decided_at
+    const p2 = env.one(`SELECT (SELECT min(started_at) FROM jobs WHERE agent_id='worker') s, (SELECT decided_at FROM approvals WHERE id=?) d`, ap.id);
+    expect(p2.d).toBeTruthy();
+    expect(p2.s).toBeGreaterThan(p2.d);
+    // P3: 1 approval.requested + 1 top-level done = 2; zero blocked; zero help messages mentioning user
+    const p3 = env.one(`SELECT count(*) n FROM events WHERE type='approval.requested'`).n
+      + env.one(`SELECT count(*) n FROM events e JOIN tasks t ON t.id=CAST(e.entity_id AS INTEGER) WHERE e.type='task.status_changed' AND e.entity_type='task' AND json_extract(e.payload,'$.to')='done' AND t.parent_id IS NULL`).n;
+    expect(p3).toBe(2);
+    expect(env.one(`SELECT count(*) n FROM events WHERE type='task.status_changed' AND json_extract(payload,'$.to')='blocked'`).n).toBe(0);
+    expect(env.one(`SELECT count(*) n FROM messages m WHERE m.kind='help' AND EXISTS (SELECT 1 FROM json_each(m.mentions) WHERE value='user')`).n).toBe(0);
+    // P4: total jobs (no status filter) <= 6
+    expect(env.one(`SELECT count(*) n FROM jobs`).n).toBeLessThanOrEqual(6);
+    // P5: injected failure in the director respond job, attempt 1: post, then crash before create_task.
+      'director:respond:a1': [{ tool: { name: 'post_message', input: { body: 'On it: proposing a task.' } } }, { exit: 1 }],
+      'director:respond:a2': [{ tool: { name: 'post_message', input: { body: 'On it: proposing a task.' } } },
+        { tool: { name: 'create_task', input: { title: 'Write INSTALL.md', description: 'Install guide', acceptance: '1. INSTALL.md exists', why: 'You asked.' } } }],
+      'worker:work': [{ write: { path: 'INSTALL.md', content: '# Install\n\nround {{round}}\n' } },
+        { tool: { name: 'update_task', input: { task_id: '{{task_id}}', action: 'submit_for_review', note: 'done' } } }],
+      'director:review:r1': [{ tool: { name: 'update_task', input: { task_id: '{{task_id}}', action: 'request_changes', note: '1. add prerequisites' } } }],
+      'director:review:r2': [{ tool: { name: 'update_task', input: { task_id: '{{task_id}}', action: 'approve' } } },
+        { tool: { name: 'post_message', input: { body: 'T is done and reviewed.', mentions: ['user'] } } }],
+    });
+    env.start();
+    await env.until(() => env.one(`SELECT doctor_ok_at FROM system_state`).doctor_ok_at, 30000, 'doctor');
+    const th = env.tx(() => createThread(env.db, 'general chat', { kind: 'user' }));
+    env.tx(() => postUserMessage(env.db, th, 'Please write INSTALL.md for the project.'));
+    const ap = await env.until(() => env.one(`SELECT * FROM approvals WHERE status='pending'`), 30000, 'approval');
+    // no worker job may start before the approval is decided
+    expect(env.one(`SELECT count(*) n FROM events WHERE type='job.started' AND json_extract(payload,'$.agent')='worker'`).n).toBe(0);
+    env.tx(() => decideApproval(env.db, ap.id, 'approved'));
     const task = await env.until(() => env.one(`SELECT * FROM tasks WHERE id=? AND status='done'`, ap.task_id), 60000, 'task done');
 
     // P1: proposed then the exact status path
@@ -52,10 +87,11 @@ describe('S1: request -> proposal -> approval -> work -> review (1 rework) -> do
     // P6: no leftover processes from any job
     await env.until(() => env.one(`SELECT count(*) n FROM jobs WHERE status='running'`).n === 0, 10000, 'jobs finished');
     for (const j of env.q(`SELECT pid FROM jobs WHERE pid IS NOT NULL`)) expect(groupAlive(j.pid)).toBe(false);
-    // P7: the user mention happens only after done
-    const mention = env.one(`SELECT min(m.created_at) t FROM messages m WHERE EXISTS (SELECT 1 FROM json_each(m.mentions) WHERE value='user')`).t;
+    // P7: no agent message mentioning the user before the task is done (approval requests excepted)
     const done = env.one(`SELECT ts FROM events WHERE type='task.status_changed' AND entity_id=? AND json_extract(payload,'$.to')='done'`, String(task.id)).ts;
-    expect(mention).toBeGreaterThanOrEqual(done);
+    expect(env.one(`SELECT count(*) n FROM messages m WHERE m.author_kind='agent' AND m.kind<>'approval' AND m.created_at < ?
+      AND EXISTS (SELECT 1 FROM json_each(m.mentions) WHERE value='user')`, done).n).toBe(0);
+    expect(env.one(`SELECT count(*) n FROM messages m WHERE m.author_kind='agent' AND EXISTS (SELECT 1 FROM json_each(m.mentions) WHERE value='user')`).n).toBeGreaterThanOrEqual(1);
     // P8 (fake): under 60 s
     expect(Date.now() - started).toBeLessThan(60000);
   });
