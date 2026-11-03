@@ -1,16 +1,39 @@
-# Review status (stopped at 4-round cap — NOT signed off)
+# Review status: SIGNED OFF (Round 12)
 
-| Round | PM | UX | Eng | Blockers (distinct) |
+Every reviewer's approval covers the current version of the docs it reviews:
+- **PM** approved in Round 4. PRD.md has not changed since Round 3.
+- **UX** approved in Round 8. UX.md has not changed since Round 7.
+- **Eng** (Opus) approved in Round 12, on the current TECH.md.
+
+The original cap was 4 rounds. The user extended it to "until signed off".
+
+| Round | PM | UX | Eng | Distinct blockers |
 |---|---|---|---|---|
-| 1 | REVISE (4) | REVISE (8) | REVISE (8, sonnet) | 18 |
-| 2 | REVISE (1) | REVISE (3) | REVISE (5, sonnet) | 9 |
-| 3 | REVISE (1) | REVISE (3) | REVISE (3, opus) | 6 |
-| 4 | **APPROVE** | REVISE (2) | REVISE (3, opus) | 4 |
+| 1 | REVISE (4) | REVISE (8) | REVISE (8, Sonnet) | 18 |
+| 2 | REVISE (1) | REVISE (3) | REVISE (5, Sonnet) | 9 |
+| 3 | REVISE (1) | REVISE (3) | REVISE (3, Opus) | 6 |
+| 4 | **APPROVE** | REVISE (2) | REVISE (3, Opus) | 4 |
+| 5 | n/a | REVISE (2) | REVISE (1, Opus) | 3 |
+| 6 | n/a | **APPROVE** | REVISE (1, Opus) | 1 |
+| 7 | n/a | REVISE (1) | REVISE (2, Opus) | 2 |
+| 8 | n/a | **APPROVE** | REVISE (2, Opus) | 2 |
+| 9 | n/a | n/a | REVISE (1, Opus) | 1 |
+| 10 | n/a | n/a | REVISE (2, Opus) | 2 |
+| 11 | n/a | n/a | REVISE (2, Opus) | 2 |
+| 12 | n/a | n/a | **APPROVE** (Opus) | 0 |
 
-## Unresolved blockers after Round 4
-1. **Terminal failure of a director `help` job** (UX R4-2 = Eng R4-1; TECH §3.2 J12, UX §3/§8). J12 treats `help` jobs as task-less, but every `help` job belongs to a `blocked/help` task. On failure the task stays "waiting on director" with no Needs-you item, and the "send again" hint wakes the worker, not the director. Proposed fix: split J12 so a failed `help` job sets `blocked_reason='job_failed'` (a Needs-you failure item that Retry re-enqueues). Keep "no task" only for `respond`. Add a §11 test.
-2. **Inbox actions for a capped thread with `cap_raises=1`** (UX R4-1; UX §3 vs §5/§5.1/§8). §3 offers only "Close thread", but Cancel task is the only real exit. Fix: §3 lists Cancel task / Close thread, plus a line saying Close leaves the task waiting.
-3. **T18 reopen into a `capped` thread** (Eng R4-2; TECH §3.3 vs §3.1 T18). One section says nothing is enqueued; the other enqueues `work`. Fix: state once that T18's `work` job is enqueued but unclaimable until Raise cap (or skip the enqueue), and add a §11 case.
-4. **"Last head" in the T8 guard** (Eng R4-3; TECH §3.1 T8, §8.3). It's undefined, so a redo that reverts drift is rejected and the task loops back to blocked. Fix: last head = `head_commit` of the newest non-`superseded` artifact, else `tasks.base_commit`. Add a §11 case.
+"n/a" means the reviewer was not re-run because the docs in its area did not change. From Round 6 on, every blocker was in process control: kill, crash recovery and Resume. Round 11 replaced argv-based process identity with process group plus start time, and that change closed the class.
 
-None of these is a disagreement between reviewers. All four are narrow consistency gaps that the Round 3 fixes introduced or exposed. The non-blocking notes from every round were not applied.
+## Last eng non-blocking notes (fix during build; none blocks the design)
+1. `procStart` must return a string. `proc_start` is a STRICT TEXT column, and comparing a number to it fails every time, so nothing would ever be killed. On macOS, run `ps -o lstart=` with `LC_ALL=C TZ=UTC`. **Fix this first.**
+2. If a row has `pid` NULL and the argv fallback is off, report `survivors: 'unknown'`, not `[]`. Don't show "Stopped".
+3. D7 should require the argv match after the init event, not just once at startup.
+4. esbuild bundle: pass the repo root from `launch.mjs` so `mcp-shim.js` and `prompts/` resolve. D7 uses the standard spawn builder.
+5. PRD §5 P6 and the risk mitigation line still describe argv-based process checks. Align them with TECH's process-group check (`kill(-pgid,0)` → ESRCH, plus `sweepByMarker`).
+
+Unapplied non-blocking notes from earlier rounds are mostly UX polish:
+- a threshold and badge for the `stale` heartbeat state
+- a precedence order for stacked banners
+- filter chips for stuck items
+- loading and error states for the log and diff views
+- focus details for the Resume dialog
