@@ -1,6 +1,6 @@
 # Slackboard Phase 2 design (delta)
 
-Status: Phase 2 Round 8 draft. This is a delta against the shipped MVP docs: `PRD.md`, `UX.md`, `TECH.md`. Anything not mentioned here is unchanged. Section refs like "TECH §5.3" point into those docs. Scope covers TECH §12 items 1–3 only.
+Status: SIGNED OFF (PM round 2, UX round 6, eng round 9 on Opus). This is a delta against the shipped MVP docs: `PRD.md`, `UX.md`, `TECH.md`. Anything not mentioned here is unchanged. Section refs like "TECH §5.3" point into those docs. Scope covers TECH §12 items 1–3 only.
 
 Code facts this delta builds on (read from the repo, not from the docs):
 - `'worker'` is hardcoded in `lib/domain/tools.ts` (`post_message` wake, mentions enum, `create_task` assignee enum), `tasks.ts` (`createTask` default, `unblockTask` presence), `rounds.ts` (`resumeTarget` fallback), `wake.ts` (`@(director|worker)` parse) and `prompts/worker.md`. Every one of these becomes "the task's assignee" or "an active worker id".
