@@ -12,10 +12,14 @@
     "doctor": "node dist/orchestrator/main.js --doctor-only",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
-    "test:e2e": "(test -f .next/BUILD_ID || next build) && npm run build:orch && vitest run -c vitest.e2e.config.ts"
+    "test:a11y": "node test/playwright/diff-keyboard.mjs",
+    "test:e2e": "(test -f .next/BUILD_ID || next build) && npm run build:orch && vitest run -c vitest.e2e.config.ts",
+    "screenshots": "node test/playwright/screenshots.mjs"
   },
   "dependencies": {
     "better-sqlite3": "^11.7.0",
+    "highlight.js": "^11.12.0",
+    "lucide-react": "0.468.0",
     "next": "14.2.35",
     "react": "18.3.1",
     "react-dom": "18.3.1",
@@ -27,6 +31,7 @@
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
     "autoprefixer": "^10.4.20",
+    "axe-core": "^4.14.0",
     "esbuild": "^0.24.2",
     "postcss": "^8.4.49",
     "tailwindcss": "^3.4.17",

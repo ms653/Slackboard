@@ -8,7 +8,7 @@ export interface TaskRow {
   created_by_kind: 'user' | 'agent'; created_by_agent_id: string | null;
   claimed_by: string | null; claim_expires_at: number | null;
   review_round: number; review_cycle: number; blocked_reason: string | null;
-  base_commit: string | null; position: number; version: number; accepted_at: number | null;
+  help_agent_id: string | null; base_commit: string | null; position: number; version: number; accepted_at: number | null;
   created_at: number; updated_at: number;
 }
 export interface ArtifactRow {
@@ -44,7 +44,7 @@ export interface ResumeTarget { status: 'blocked' | 'in_review' | 'todo'; agent:
 
 /** resumeTarget(task, via) — evaluated on the task row as it is; ws = workspace facts computed outside the txn. */
 export function resumeTarget(db: DB, t: TaskRow, via: 'retry' | 'reply', ws: WorkspaceFacts): ResumeTarget {
-  const assignee = t.assignee_agent_id ?? 'worker';
+  const assignee = t.assignee_agent_id as string;          // the task's assignee (PHASE2 §T3.1)
   if (via === 'retry' && helpFailed(db, t)) return { status: 'blocked', agent: 'director', kind: 'help', redo: false };
   if (t.blocked_reason === 'review_cap') return { status: 'todo', agent: assignee, kind: 'work', redo: false };
   const a = currentArtifact(db, t);

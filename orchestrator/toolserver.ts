@@ -1,7 +1,7 @@
 import http from 'node:http';
 import type { DB } from '@/lib/db';
 import { sha256, randomToken } from '@/lib/util';
-import { callTool, TOOL_SCHEMAS, allowedTools, type Caller } from '@/lib/domain/tools';
+import { callTool, publishedTools, type Caller } from '@/lib/domain/tools';
 import { agentRole, type JobRow } from '@/lib/domain/jobs';
 
 /** In-memory tokens (plus hashes in jobs.run_token_hash). Doctor tokens never touch the DB (TECH §6.4). */
@@ -48,8 +48,7 @@ export function startToolServer(deps: ToolServerDeps): Promise<http.Server> {
         if (!live) return json(res, 401, { ok: false, error: 'unauthorized', hint: 'run token revoked or unknown' });
         if (live.jobId === null) {                                     // doctor mode
           if (live.doctorPid === undefined || live.doctorPid !== ppid) return json(res, 401, { ok: false, error: 'unauthorized' });
-          const names = allowedTools({ role: 'director', kind: 'respond' });
-          if (url === '/tools') return json(res, 200, { ok: true, tools: names.map((n) => ({ name: n, ...TOOL_SCHEMAS[n] })) });
+          if (url === '/tools') return json(res, 200, { ok: true, tools: publishedTools(deps.db, { role: 'director', kind: 'respond' }) });
           if (body.tool !== 'add_note') return json(res, 200, { ok: false, error: 'not_allowed_for_role', hint: 'doctor probe' });
           live.onCall?.(body.tool, body.input);
           return json(res, 200, { ok: true, note_id: 0 });
@@ -58,7 +57,7 @@ export function startToolServer(deps: ToolServerDeps): Promise<http.Server> {
         if (!j) return json(res, 401, { ok: false, error: 'unauthorized', hint: 'job is not running' });
         if (j.pid == null || j.pid !== ppid) return json(res, 401, { ok: false, error: 'unauthorized', hint: 'parent pid mismatch' });
         const caller: Caller = { jobId: j.id, agent: j.agent_id, role: agentRole(deps.db, j.agent_id), kind: j.kind, threadId: j.thread_id, taskId: j.task_id };
-        if (url === '/tools') return json(res, 200, { ok: true, tools: allowedTools(caller).map((n) => ({ name: n, ...TOOL_SCHEMAS[n] })) });
+        if (url === '/tools') return json(res, 200, { ok: true, tools: publishedTools(deps.db, caller) });
         if (url === '/rpc' && req.method === 'POST') return json(res, 200, callTool(deps.db, caller, String(body.tool), body.input));
         return json(res, 404, { ok: false, error: 'not_found' });
       } catch (e: any) {

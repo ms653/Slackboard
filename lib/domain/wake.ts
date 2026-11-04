@@ -6,6 +6,7 @@ import { getThread } from './threads';
 import { resumeTarget, type TaskRow } from './rounds';
 import { unblockTask } from './tasks';
 import { budgetBlocked } from './claim';
+import { activeWorkerIds } from './agents';
 import type { WorkspaceFacts } from './git';
 
 export const ORCH_STALE_MS = 15_000;
@@ -41,7 +42,8 @@ export function wakePreview(db: DB, threadId: number, ws?: WorkspaceFacts): Wake
 export function postUserMessage(db: DB, threadId: number, body: string, ws?: WorkspaceFacts) {
   const th = getThread(db, threadId);
   if (!th) throw new Error('not_found');
-  const mentions = Array.from(new Set((body.match(/@(director|worker)\b/g) ?? []).map((m) => m.slice(1))));
+  const names = ['director', ...activeWorkerIds(db)];
+  const mentions = Array.from(new Set((body.match(new RegExp(`@(${names.join('|')})\\b`, 'g')) ?? []).map((m) => m.slice(1))));
   const preview = wakePreview(db, threadId, ws);
   const msgId = insertMessage(db, { thread: threadId, authorKind: 'user', body, mentions });
   if (!preview) return { message_id: msgId, woke: null };

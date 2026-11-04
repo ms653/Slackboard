@@ -3,7 +3,8 @@ import { useEffect, useRef, useState } from 'react';
 import { useStore } from './store';
 import { api } from './api';
 import { BLOCK_TEXT } from './Header';
-import { hhmm } from './ui';
+import { ArrowUp, CircleSlash } from 'lucide-react';
+import { Icon, hhmm } from './ui';
 
 /** Hint computed from the server's wakePreview (TECH §5.1) — the same function that enqueues. */
 export function hintText(p: any, threadStatus: string | null, boot: any): string[] {
@@ -22,8 +23,8 @@ export function hintText(p: any, threadStatus: string | null, boot: any): string
   return lines;
 }
 
-export function Composer({ threadId, preview, threadStatus, onSent, label }: {
-  threadId: number | null; preview: any; threadStatus: string | null; onSent?: (r: any) => void; label: string }) {
+export function Composer({ threadId, preview, threadStatus, onSent, label, spawnQueued }: {
+  threadId: number | null; preview: any; threadStatus: string | null; onSent?: (r: any) => void; label: string; spawnQueued?: boolean }) {
   const { boot, refresh, composerPrefill, set } = useStore();
   const [text, setText] = useState('');
   const [busy, setBusy] = useState(false);
@@ -39,17 +40,22 @@ export function Composer({ threadId, preview, threadStatus, onSent, label }: {
     catch (e: any) { setErr(e.hint || e.code); }
     finally { setBusy(false); }
   };
-  const hints = hintText(preview, threadStatus, boot);
+  const hints = spawnQueued ? ['Director queued (after spawn approval)'] : hintText(preview, threadStatus, boot);
+  const id = `composer-${threadId ?? 'root'}`;
   return (
-    <div className="border-t border-slate-700 p-3">
-      <label htmlFor={`composer-${threadId ?? 'root'}`} className="sr-only">{label}</label>
-      <div className="flex gap-2">
-        <textarea id={`composer-${threadId ?? 'root'}`} ref={ref} data-composer rows={2} className="input flex-1 resize-y" placeholder={label} value={text}
-          onChange={(e) => setText(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } }} />
-        <button type="button" className="btn bg-sky-700 hover:bg-sky-600 self-end" disabled={busy || !text.trim()} onClick={send}>{busy ? 'Sending…' : 'Send'}</button>
+    <div className="mx-4 mb-4 mt-2 rounded-xl bg-elevated shadow-sm ring-1 ring-separator-strong focus-within:ring-2 focus-within:ring-accent transition-shadow">
+      <label htmlFor={id} className="sr-only">{label}</label>
+      <textarea id={id} ref={ref} data-composer rows={2} aria-describedby={`${id}-hint`}
+        className="block w-full resize-none bg-transparent px-3.5 pt-3 pb-1 text-body-lg text-fg-primary placeholder:text-fg-tertiary focus:outline-none min-h-[44px] max-h-[200px] rounded-t-xl" placeholder={label} value={text}
+        onChange={(e) => setText(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } }} />
+      <div className="flex items-end gap-2 px-2.5 pb-2">
+        <div id={`${id}-hint`} className="flex-1 min-w-0 text-caption text-fg-secondary" aria-live="polite">
+          {hints.map((h, i) => i === 0 ? <div key={h} className="truncate" title={h}>{h}</div>
+            : <div key={h} className="flex items-start gap-1 text-status-warn"><Icon as={CircleSlash} size={14} className="mt-px" />{h}</div>)}
+        </div>
+        <button type="button" className="btn btn-primary btn-sm" disabled={busy || !text.trim()} onClick={send}>{busy ? 'Sending…' : <><Icon as={ArrowUp} size={14} />Send</>}</button>
       </div>
-      {err && <div role="alert" className="text-xs text-rose-300 mt-1">Not sent: {err}. <button className="underline" onClick={send}>Retry</button></div>}
-      <div className="text-xs text-slate-400 mt-1" aria-live="polite">{hints.map((h) => <div key={h}>{h}</div>)}</div>
+      {err && <div role="alert" className="px-3.5 pb-2 text-callout text-danger">Not sent: {err}. <button className="btn btn-link inline" onClick={send}>Retry</button></div>}
     </div>
   );
 }

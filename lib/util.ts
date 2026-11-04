@@ -25,5 +25,9 @@ export function backoffMs(attempt: number, rand = Math.random): number {
   return Math.round(base * scale);
 }
 export class DomainError extends Error {
+  extra?: Record<string, unknown>;
   constructor(public code: string, public hint = '', public status = 409) { super(code); }
 }
+
+/** XML-escape so embedded content cannot close or forge tags (TECH §6.3). */
+export const xmlEsc = (s: string): string => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');

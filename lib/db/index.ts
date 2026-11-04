@@ -1,5 +1,6 @@
 import Database from 'better-sqlite3';
 import { SCHEMA_SQL } from './schema';
+import { MIGRATION_2_SQL } from './migrations';
 import { paths, ensureDir, dataDir } from '../paths';
 import { now } from '../util';
 
@@ -18,24 +19,30 @@ export function openDb(file: string = paths.db()): DB {
 }
 
 const DIRECTOR_TOOLS = ['Read', 'Glob', 'Grep', 'post_message', 'create_task', 'update_task', 'add_note', 'request_help', 'request_approval'];
-const WORKER_TOOLS = ['Read', 'Glob', 'Grep', 'Write', 'Edit', 'post_message', 'update_task', 'add_note', 'request_help'];
+export const WORKER_TOOLS = ['Read', 'Glob', 'Grep', 'Write', 'Edit', 'post_message', 'update_task', 'add_note', 'request_help'];
 
-/** DDL, seeds and user_version in one transaction (TECH §2). Idempotent. */
+/** Ordered migration steps, each in its own transaction including the user_version write (TECH §2, PHASE2 §T1). Idempotent. */
 export function migrate(db: DB): void {
   const v = db.pragma('user_version', { simple: true }) as number;
-  if (v >= 1) return;
-  const t = now();
-  db.transaction(() => {
-    db.exec(SCHEMA_SQL);
-    db.prepare(`INSERT INTO channels(name, created_at) VALUES ('general', ?)`).run(t);
-    const ins = db.prepare(`INSERT INTO agents(id, display_name, role, model, max_turns, max_budget_usd, allowed_tools, created_at)
-                            VALUES (?,?,?,?,?,?,?,?)`);
-    ins.run('director', 'Director', 'director', 'sonnet', 8, 0.40, JSON.stringify(DIRECTOR_TOOLS), t);
-    ins.run('worker', 'Worker', 'worker', 'sonnet', 15, 1.00, JSON.stringify(WORKER_TOOLS), t);
-    db.prepare(`INSERT INTO budgets(scope, period, limit_usd, limit_jobs, updated_at) VALUES ('global','day',5.00,60,?)`).run(t);
-    db.prepare(`INSERT INTO budgets(scope, period, limit_usd, limit_jobs, updated_at) VALUES ('global','rolling_5h',NULL,25,?)`).run(t);
-    db.pragma('user_version = 1');
-  })();
+  if (v < 1) {
+    const t = now();
+    db.transaction(() => {
+      if ((db.pragma('user_version', { simple: true }) as number) >= 1) return;
+      db.exec(SCHEMA_SQL);
+      db.prepare(`INSERT INTO channels(name, created_at) VALUES ('general', ?)`).run(t);
+      const ins = db.prepare(`INSERT INTO agents(id, display_name, role, model, max_turns, max_budget_usd, allowed_tools, created_at)
+                              VALUES (?,?,?,?,?,?,?,?)`);
+      ins.run('director', 'Director', 'director', 'sonnet', 8, 0.40, JSON.stringify(DIRECTOR_TOOLS), t);
+      ins.run('worker', 'Worker', 'worker', 'sonnet', 15, 1.00, JSON.stringify(WORKER_TOOLS), t);
+      db.prepare(`INSERT INTO budgets(scope, period, limit_usd, limit_jobs, updated_at) VALUES ('global','day',5.00,60,?)`).run(t);
+      db.prepare(`INSERT INTO budgets(scope, period, limit_usd, limit_jobs, updated_at) VALUES ('global','rolling_5h',NULL,25,?)`).run(t);
+      db.pragma('user_version = 1');
+    }).immediate();
+  }
+  if (v < 2) db.transaction(() => {                 // IMMEDIATE + re-check: Next.js and the orchestrator may open the DB concurrently
+    if ((db.pragma('user_version', { simple: true }) as number) >= 2) return;
+    db.exec(MIGRATION_2_SQL);
+  }).immediate();
 }
 
 let shared: DB | null = null;
