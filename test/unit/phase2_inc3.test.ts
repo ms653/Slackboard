@@ -291,7 +291,7 @@ describe('increment 2 review fixes carried into this pass', () => {
     tx(db, () => finishAttempt(db, wa.id, ok, ME));
     const hj = claim(db)!; expect(hj.agent_id).toBe('writer2');
     callTool(db, caller(hj, 'worker'), 'request_help', { question: 'cannot answer' });
-    db.prepare(`UPDATE system_state SET kill_switch=1`).run();
+    db.prepare(`UPDATE system_state SET kill_switch=1, kill_engaged_at=?`).run(Date.now());
     expect(tx(db, () => finishAttempt(db, hj.id, { exitCode: 143, killedFor: 'kill' } as any, ME))!.rule).toBe('J15');
     expect(db.prepare(`SELECT count(*) n FROM jobs WHERE task_id=? AND kind='help' AND agent_id='director'`).get(tid)).toEqual({ n: 0 });
     expect(getTask(db, tid)!.help_agent_id).not.toBe('director');

@@ -139,8 +139,8 @@ try {
   void same;
   // PM-1 (P2-S8 c2): worker running -> [+ Comment] disabled with the reason; `c` announces and opens nothing
   await page.setViewportSize({ width: 1400, height: 900 });
-  const wdb = () => new Database(path.join(home, dbfile));
-  { const d = wdb(); try { d.prepare(`UPDATE tasks SET status='in_progress' WHERE id=?`).run(seeded.task_id); } finally { d.close(); } }
+  const wdb = () => { const d = new Database(path.join(home, dbfile)); d.exec('DROP TRIGGER IF EXISTS tasks_legal_transition'); return d; };   // temp DB only: force statuses the state machine would not allow directly
+  { const d = wdb(); try { d.prepare(`UPDATE tasks SET status='in_progress', claimed_by=assignee_agent_id, claim_expires_at=? WHERE id=?`).run(Date.now() + 3600_000, seeded.task_id); } finally { d.close(); } }
   await page.reload(); await page.locator('nav[aria-label="Workspace"]').waitFor(); await page.waitForTimeout(500);
   await page.keyboard.press('g'); await page.keyboard.press('b');
   const card2 = page.locator('[data-task-card]').first(); await card2.waitFor(); await card2.focus();
@@ -158,7 +158,7 @@ try {
     fs.appendFileSync(path.join(home, 'workspaces', `T-${seeded.task_id}`, 'docs/INSTALL.md'), 'round two\n');
     g('add', '-A', '--force'); g('commit', '-q', '-m', 'round 2'); const head2 = g('rev-parse', 'HEAD');
     const d = wdb();
-    try { d.prepare(`UPDATE tasks SET status='in_review' WHERE id=?`).run(seeded.task_id);
+    try { d.prepare(`UPDATE tasks SET status='in_review', claimed_by=NULL, claim_expires_at=NULL WHERE id=?`).run(seeded.task_id);
       d.prepare(`INSERT INTO artifacts(task_id, review_cycle, review_round, base_commit, head_commit, diff_path, files, lines_added, lines_removed, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)`)
         .run(seeded.task_id, a1.review_cycle, 2, a1.base_commit, head2, a1.diff_path, a1.files, a1.lines_added, a1.lines_removed, Date.now()); } finally { d.close(); }
   }
