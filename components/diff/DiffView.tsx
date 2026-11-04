@@ -28,7 +28,9 @@ export function DiffView({ data, show, setShow, reload, expanded, toggleExpand }
   const [pendingFocus, setPendingFocus] = useState<{ path: string; side: 'old' | 'new'; line: number } | null>(null);
   const compare = show.kind === 'compare';
 
-  useEffect(() => { loadHighlighter().then(setHl, () => {}); }, []);
+  const [, setWinW] = useState(0);
+  useEffect(() => { loadHighlighter().then(setHl, () => {}); const f = () => setWinW(window.innerWidth); f(); window.addEventListener('resize', f); return () => window.removeEventListener('resize', f); }, []);
+  const modeRefocus = useRef(false);
   useEffect(() => {
     const el = root.current; if (!el) return;
     const ro = new ResizeObserver(() => setWidth(el.clientWidth)); ro.observe(el); setWidth(el.clientWidth);
@@ -90,10 +92,16 @@ export function DiffView({ data, show, setShow, reload, expanded, toggleExpand }
     const note = line.type === 'ctx' && cellSide === 'old' ? ' (unchanged line; comments on unchanged lines attach to the new side)' : '';
     setComposer({ line, path, side, label: `Comment on ${side} line ${no} of ${path}${note}`, invoker });
   };
+  const refocus = useRef<HTMLElement | null>(null);
   const closeComposer = (focusBack = true) => {
     const c = composer; setComposer(null);
-    if (focusBack && c) setTimeout(() => { if (c.invoker && document.contains(c.invoker)) c.invoker.focus(); else { const k = effActive; cellEl(k)?.focus(); } }, 0);
+    if (focusBack && c) refocus.current = c.invoker ?? null;
   };
+  useEffect(() => {                                   // after the textarea is gone, focus returns to the invoking element (the line)
+    if (composer || !refocus.current) return;
+    const el = refocus.current; refocus.current = null;
+    if (document.contains(el)) el.focus(); else cellEl(effActive)?.focus();
+  });
   const save = async (body: string) => {
     if (!composer) return;
     const side = composer.side, line = side === 'old' ? composer.line.oldNo : composer.line.newNo;
@@ -130,8 +138,13 @@ export function DiffView({ data, show, setShow, reload, expanded, toggleExpand }
     setPref(v); try { localStorage.setItem('sb.diffView', v); } catch {}
     const m = effActive.match(/^(\d+):/); const lineId = m ? m[1] : null;
     if (lineId) { const l = [...ids.entries()].find(([, i]) => String(i) === lineId)?.[0]; if (l) setActive(v === 'unified' ? `${lineId}:u` : `${lineId}:${l.type === 'del' ? 'old' : 'new'}`); }
-    setTimeout(() => { if (document.activeElement === document.body) root.current?.querySelector<HTMLElement>('[data-cell][tabindex="0"]')?.focus(); }, 0);
+    modeRefocus.current = true;
   };
+
+  useEffect(() => {                                   // keep keyboard focus on the same line when the layout switches
+    if (!modeRefocus.current) return; modeRefocus.current = false;
+    if (document.activeElement === document.body || !document.activeElement?.isConnected) root.current?.querySelector<HTMLElement>('[data-cell][tabindex="0"]')?.focus();
+  }, [mode, effActive]);
 
   // keyboard (PHASE2 §B5): active while focus is inside the Detail pane and not in a text field
   useEffect(() => {
