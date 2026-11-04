@@ -1,5 +1,4 @@
 # Phase 2 migration validator (referenced from docs/PHASE2.md §T1 and §T9; release gate).
-# Round 3 version (tasks 11/13, jobs 21-23) executed green: sqlite 3.53.1 / OK: migration 2 validated.
 # Round 5 version (incl. task 15 / jobs 26-27) executed green: sqlite 3.53.1 / OK: migration 2 validated.
 """Validate docs/PHASE2.md MIGRATION 2 against lib/db/schema.ts SCHEMA_SQL.
 Usage: python3 -I validate_v2.py /home/user/Slackboard
