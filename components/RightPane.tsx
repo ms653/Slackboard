@@ -3,7 +3,8 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useStore, type Pane } from './store';
 import { api } from './api';
 import { Composer } from './Composer';
-import { ActionButton, Dialog, NoteDialog, TaskStatus, Time, usd } from './ui';
+import { ChevronLeft, ChevronRight, CirclePause, CircleCheck, CircleMinus, CircleX, Clock, CornerDownRight, Info, LoaderCircle, Maximize2, Minimize2, OctagonX, RefreshCw, RotateCcw, X, Circle, CircleDot, Eye } from 'lucide-react';
+import { ActionButton, Avatar, Dialog, DialogFooter, Icon, NoteDialog, Rich, RoleChip, SelectWrap, TaskStatus, Time, usd } from './ui';
 import { retryToast } from './NeedsYou';
 import { DiffView, type Show } from './diff/DiffView';
 import { EDIT_BUDGET, budgetHitAgent, systemLineHasAction, reproposeDefault, notWokenReason, peerNotStartedAgent } from '../lib/systemLines';
@@ -25,14 +26,14 @@ function PaneShell({ title, children, footer, actions }: { title: React.ReactNod
   const h = useRef<HTMLHeadingElement>(null);
   useEffect(() => { h.current?.focus(); }, []);
   return (
-    <div className="h-full flex flex-col">
-      <div className="flex items-center gap-2 p-3 border-b border-slate-700">
-        {panes.length > 1 && <button className="btn bg-slate-700" onClick={back} aria-label="Back">←</button>}
-        <h2 ref={h} tabIndex={-1} className="font-semibold flex-1 truncate outline-none">{title}</h2>
+    <div className="h-full flex flex-col min-h-0">
+      <div className="h-12 shrink-0 flex items-center gap-2 px-4 border-b border-separator material-bar">
+        {panes.length > 1 && <button className="btn btn-ghost btn-icon" onClick={back} aria-label="Back" title="Back"><Icon as={ChevronLeft} size={18} /></button>}
+        <h2 ref={h} tabIndex={-1} className="text-headline flex-1 min-w-0 truncate outline-none">{title}</h2>
         {actions}
-        <button className="btn bg-slate-700" onClick={close} aria-label="Close pane (Esc)">✕</button>
+        <button className="btn btn-ghost btn-icon" onClick={close} aria-label="Close pane (Esc)" title="Close"><Icon as={X} size={18} /></button>
       </div>
-      <div className="flex-1 overflow-y-auto">{children}</div>
+      <div className="flex-1 overflow-y-auto overscroll-contain min-h-0">{children}</div>
       {footer}
     </div>
   );
@@ -42,10 +43,10 @@ function PaneShell({ title, children, footer, actions }: { title: React.ReactNod
 function SystemBody({ body, thread, task, lastPeerLine, peerQueued }: { body: string; thread: any; task: any; lastPeerLine: boolean; peerQueued: boolean }) {
   const { openSettingsAgent, refresh, toast } = useStore();
   const agent = budgetHitAgent(body);
-  const btn = 'ml-1 underline text-sky-300';
+  const btn = 'btn btn-link ml-1 text-callout inline';
   if (agent) {
     const i = body.indexOf(EDIT_BUDGET);
-    return <>{body.slice(0, i)}<button type="button" className="underline text-sky-300" onClick={() => openSettingsAgent({ agent, field: 'usd' })}>Edit budget</button>{body.slice(i + EDIT_BUDGET.length)}</>;
+    return <>{body.slice(0, i)}<button type="button" className="btn btn-link text-callout inline" onClick={() => openSettingsAgent({ agent, field: 'usd' })}>Edit budget</button>{body.slice(i + EDIT_BUDGET.length)}</>;
   }
   const why = notWokenReason(body);
   if (why === 'thread_capped' && thread.status === 'capped' && thread.cap_raises === 0)
@@ -75,8 +76,8 @@ function ThreadPane({ id }: { id: number }) {
   const [showSys, setShowSys] = useState(true);
   const end = useRef<HTMLDivElement>(null);
   useEffect(() => { end.current?.scrollIntoView({ block: 'end' }); }, [data?.messages?.length]);
-  if (err) return <PaneShell title="Thread"><p role="alert" className="p-4 text-rose-300">Couldn&apos;t load thread ({err}).</p></PaneShell>;
-  if (!data) return <PaneShell title="Thread"><p className="p-4 text-slate-400">Loading messages…</p></PaneShell>;
+  if (err) return <PaneShell title="Thread"><p role="alert" className="p-4 text-body text-danger">Couldn&apos;t load thread ({err}).</p></PaneShell>;
+  if (!data) return <PaneShell title="Thread"><p className="p-4 text-callout text-fg-tertiary">Loading messages…</p></PaneShell>;
   const th = data.thread, task = data.task;
   const sys = data.messages.filter((m: any) => m.author_kind === 'system').length;
   const pct = (a: number, b: number) => a / b >= 0.8;
@@ -90,43 +91,57 @@ function ThreadPane({ id }: { id: number }) {
     else toast(action === 'close' ? (task && !['done', 'cancelled'].includes(task.status) ? `Thread closed. ${tk} is waiting.` : 'Thread closed') : action === 'raise_cap' ? 'Cap raised.' : 'Thread reopened.');
   };
   return (
-    <PaneShell title={<>Thread: {th.title}</>} footer={<>
-      <div className="px-3 pt-2 text-xs text-slate-400">
+    <PaneShell title={<>Thread: {th.title}</>} footer={<div className="shrink-0 border-t border-separator">
+      <div className="px-5 py-1.5 text-caption text-fg-tertiary tabular-nums">
         Agent messages {th.agent_msg_count}/{th.max_agent_msgs} · Agent runs {th.agent_job_count}/{th.max_agent_jobs}{data.peer_help > 0 && <> · Peer help {data.peer_help}/2</>}
-        {(pct(th.agent_msg_count, th.max_agent_msgs) || pct(th.agent_job_count, th.max_agent_jobs)) && <span className="text-amber-300 ml-1">· Near limit</span>}
+        {(pct(th.agent_msg_count, th.max_agent_msgs) || pct(th.agent_job_count, th.max_agent_jobs)) && <span className="pill bg-tint-warn text-status-warn ml-1.5">Near limit</span>}
       </div>
       {th.status === 'closed'
-        ? <div className="p-3 text-sm flex items-center gap-2">Thread closed.{task && !['done', 'cancelled'].includes(task.status) ? ` T-${task.id} is waiting.` : ''}
-            <ActionButton label="Reopen" run={() => threadAct('reopen')} /></div>
+        ? <div className="mx-4 mb-4 rounded-xl bg-fill px-4 py-3 text-body text-fg-secondary flex items-center gap-2 flex-wrap">Thread closed.{task && !['done', 'cancelled'].includes(task.status) ? ` T-${task.id} is waiting.` : ''}
+            <ActionButton small label="Reopen" run={() => threadAct('reopen')} /></div>
         : th.status === 'capped'
-          ? <div className="p-3 text-sm flex flex-wrap items-center gap-2">Thread reached its limit. Agents can no longer post here.
-              {th.cap_raises ? <span>Cap already raised once.</span> : <ActionButton label="Raise cap" kind="primary" run={() => threadAct('raise_cap')} />}
-              <ActionButton label="Close thread" run={() => threadAct('close')} /></div>
+          ? <div className="mx-4 mb-4 rounded-xl bg-fill px-4 py-3 text-body text-fg-secondary flex flex-wrap items-center gap-2">Thread reached its limit. Agents can no longer post here.
+              {th.cap_raises ? <span>Cap already raised once.</span> : <ActionButton small label="Raise cap" kind="primary" run={() => threadAct('raise_cap')} />}
+              <ActionButton small label="Close thread" run={() => threadAct('close')} /></div>
           : <Composer threadId={id} preview={data.preview} threadStatus={th.status} label="Reply…" spawnQueued={data.spawn_queued} />}
-    </>}>
-      <div className="p-3 flex gap-2 items-center flex-wrap text-sm border-b border-slate-800">
-        {task && <button className="underline" onClick={() => open({ kind: 'task', id: task.id })}>Task T-{task.id} · <TaskStatus s={task.status} /></button>}
-        {task && task.review_round > 0 && <span className="text-slate-400">Round {task.review_round} of 2</span>}
-        {th.status !== 'closed' && <ActionButton label="Close thread" run={() => threadAct('close')} />}
-        {sys > 0 && <button className="text-xs underline ml-auto" onClick={() => setShowSys((s) => !s)}>{showSys ? 'Hide' : 'Show'} {sys} system events</button>}
+    </div>}>
+      <div className="px-4 py-2.5 flex gap-2 items-center flex-wrap text-body border-b border-separator">
+        {task && <button className="btn btn-link inline-flex" onClick={() => open({ kind: 'task', id: task.id })}>Task T-{task.id} · <TaskStatus s={task.status} /></button>}
+        {task && task.review_round > 0 && <span className="text-callout text-fg-secondary">Round {task.review_round} of 2</span>}
+        {th.status !== 'closed' && <ActionButton small label="Close thread" run={() => threadAct('close')} />}
+        {sys > 0 && <button className="btn btn-ghost btn-sm text-fg-tertiary ml-auto" onClick={() => setShowSys((s) => !s)}><Icon as={ChevronRight} size={14} className={showSys ? 'rotate-90' : ''} />{showSys ? 'Hide' : 'Show'} {sys} system events</button>}
       </div>
-      <ol className="p-3 space-y-3" aria-live="polite" data-nav-list="messages">
-        {data.messages.map((m: any, i: number) => m.author_kind === 'system'
-          ? ((showSys || systemLineHasAction(m.body)) && <li key={m.id} tabIndex={0} className="text-xs text-slate-400 focus:outline focus:outline-2 focus:outline-sky-400"><span aria-hidden>▸</span> system · <Time t={m.created_at} now={boot.now} /> <SystemBody body={m.body} thread={th} task={task} lastPeerLine={lastPeerIdx === i} peerQueued={peerQueued} /></li>)
-          : <li key={m.id} tabIndex={0} className={`focus:outline focus:outline-2 focus:outline-sky-400 ${m.kind === 'help' ? 'border-l-2 border-amber-400 pl-2' : ''}`}>
-              <div className="text-xs text-slate-400"><span className="font-semibold text-slate-200">{roleChip(m)}</span>{msgChip(m) ? ` (${msgChip(m)})` : ''} · <Time t={m.created_at} now={boot.now} /></div>
-              <div className="text-sm whitespace-pre-wrap">{m.body}</div>
-            </li>)}
-        {data.running.map((r: any) => <li key={r.agent_id} className="text-xs text-sky-300">{r.agent_id} is working…</li>)}
+      <ol className="py-2" aria-live="polite" data-nav-list="messages">
+        {data.messages.map((m: any, i: number) => {
+          if (m.author_kind === 'system') return (showSys || systemLineHasAction(m.body)) && <li key={m.id} tabIndex={0} className="focus-inset flex items-start gap-2 px-4 py-1 text-callout text-fg-tertiary"><span className="mt-px"><Icon as={Info} size={14} /></span><span className="min-w-0">system · <Time t={m.created_at} now={boot.now} /> <SystemBody body={m.body} thread={th} task={task} lastPeerLine={lastPeerIdx === i} peerQueued={peerQueued} /></span></li>;
+          const prev = data.messages[i - 1];
+          const grouped = !!prev && prev.author_kind === m.author_kind && prev.author_agent_id === m.author_agent_id && m.created_at - prev.created_at < 300_000 && m.kind === 'chat' && prev.kind === 'chat';
+          const you = m.author_kind === 'user';
+          return <li key={m.id} tabIndex={0} className={`focus-inset group flex gap-3 px-4 py-1.5 hover:bg-fill/60 ${m.kind === 'help' ? 'border-l-2 border-status-warn' : ''}`}>
+            {grouped ? <span className="w-7 shrink-0" aria-hidden /> : <Avatar name={roleChip(m)} you={you} />}
+            <div className="min-w-0 flex-1">
+              {grouped
+                ? <span className="sr-only">{roleChip(m)} <Time t={m.created_at} now={boot.now} /></span>
+                : <div className="flex items-baseline gap-2 flex-wrap"><span className="text-body font-semibold text-fg-primary">{roleChip(m)}</span>
+                    {msgChip(m) && <RoleChip>{msgChip(m)}</RoleChip>}
+                    <span className="text-caption text-fg-tertiary tabular-nums"><Time t={m.created_at} now={boot.now} /></span></div>}
+              <div className="text-body-lg text-fg-primary whitespace-pre-wrap break-words"><Rich text={m.body} /></div>
+            </div>
+          </li>; })}
+        {data.running.map((r: any) => <li key={r.agent_id} className="px-4 py-1 text-callout text-fg-secondary flex items-center gap-2"><Icon as={LoaderCircle} size={14} className="animate-spin text-accent" />{r.agent_id} is working…</li>)}
       </ol>
-      {data.artifacts.length > 0 && <div className="px-3 pb-3 flex gap-2 flex-wrap">{data.artifacts.map((a: any) =>
-        <button key={a.id} className="text-xs underline" onClick={() => open({ kind: 'review', id: a.id })}>View diff (cycle {a.review_cycle}, round {a.review_round}{a.verdict ? `, ${a.verdict.replace('_', ' ')}` : ''})</button>)}</div>}
+      {data.artifacts.length > 0 && <div className="px-4 pb-3 flex gap-2 flex-wrap">{data.artifacts.map((a: any) =>
+        <button key={a.id} className="btn btn-secondary btn-sm" onClick={() => open({ kind: 'review', id: a.id })}>View diff (cycle {a.review_cycle}, round {a.review_round}{a.verdict ? `, ${a.verdict.replace('_', ' ')}` : ''})</button>)}</div>}
       <div ref={end} />
     </PaneShell>
   );
 }
 
-const JOB_ICON: Record<string, string> = { queued: '◔', running: '●', succeeded: '✓', failed: '✕', cancelled: '–', killed: '■' };
+const JOB_ICON: Record<string, [typeof Clock, string]> = {
+  queued: [Clock, 'text-fg-secondary'], running: [CircleDot, 'text-status-progress'], succeeded: [CircleCheck, 'text-status-done'],
+  failed: [CircleX, 'text-danger'], cancelled: [CircleMinus, 'text-fg-tertiary'], killed: [OctagonX, 'text-danger'],
+};
+const SECTION = 'text-caption font-semibold text-fg-tertiary mb-1';
 
 function TaskPane({ id }: { id: number }) {
   const { data, err } = useFetch<any>(`/api/tasks/${id}`);
@@ -134,8 +149,8 @@ function TaskPane({ id }: { id: number }) {
   const [dlg, setDlg] = useState<React.ReactNode>(null);
   const [reTo, setReTo] = useState('');
   const [rsErr, setRsErr] = useState<string | null>(null);
-  if (err) return <PaneShell title={`T-${id}`}><p role="alert" className="p-4 text-rose-300">Couldn&apos;t load task ({err}).</p></PaneShell>;
-  if (!data) return <PaneShell title={`T-${id}`}><p className="p-4 text-slate-400">Loading…</p></PaneShell>;
+  if (err) return <PaneShell title={`T-${id}`}><p role="alert" className="p-4 text-body text-danger">Couldn&apos;t load task ({err}).</p></PaneShell>;
+  if (!data) return <PaneShell title={`T-${id}`}><p className="p-4 text-callout text-fg-tertiary">Loading…</p></PaneShell>;
   const t = data.task;
   const card = boot.tasks.find((x: any) => x.id === id) ?? {};
   const post = async (action: string, note?: string) => { const r = await api(`/api/tasks/${id}`, { body: { action, note } }); await refresh(); return r; };
@@ -145,24 +160,24 @@ function TaskPane({ id }: { id: number }) {
   const reToId = reTo || reproposeDefault(t.assignee_agent_id, enabledWorkers) || '';
   const agentTop = t.created_by_kind === 'agent' && !t.parent_id;
   const cancel = () => setDlg(<Dialog title={`Cancel T-${id}?`} onClose={() => setDlg(null)}>
-    <p className="text-sm mb-3">Queued runs are cancelled and a running agent is stopped.</p>
-    {agentTop && enabledWorkers.length > 0 && <div className="mb-3 text-sm">
-      <label htmlFor="re-to" className="block text-xs mb-1">Re-propose to</label>
-      <select id="re-to" className="input" value={reToId} onChange={(e) => setReTo(e.target.value)}>
-        {enabledWorkers.map((a: any) => <option key={a.id} value={a.id}>{a.display_name}</option>)}</select>
+    <p className="text-body text-fg-secondary">Queued runs are cancelled and a running agent is stopped.</p>
+    {agentTop && enabledWorkers.length > 0 && <div className="mt-3 text-body">
+      <label htmlFor="re-to" className="field-label block mb-1">Re-propose to</label>
+      <SelectWrap className="block"><select id="re-to" className="input select" value={reToId} onChange={(e) => setReTo(e.target.value)}>
+        {enabledWorkers.map((a: any) => <option key={a.id} value={a.id}>{a.display_name}</option>)}</select></SelectWrap>
       <div className="mt-2"><ActionButton label={`Cancel and ask the director to re-propose to ${reToId}`} run={async () => {
         const to = reToId;
         await post('cancel'); setDlg(null); toast(`T-${id} cancelled`);
         set({ composerPrefill: `@director Re-propose T-${id} "${t.title}" assigned to ${to}.` }); setView('chat'); close(); }} /></div></div>}
-    <div className="flex justify-end gap-2"><button className="btn bg-slate-700" onClick={() => setDlg(null)}>Keep</button>
-      <ActionButton label="Cancel task" kind="danger" run={async () => { await post('cancel'); setDlg(null); toast(`T-${id} cancelled`); }} /></div></Dialog>);
+    <DialogFooter><button className="btn btn-secondary" onClick={() => setDlg(null)}>Keep</button>
+      <ActionButton label="Cancel task" kind="danger" run={async () => { await post('cancel'); setDlg(null); toast(`T-${id} cancelled`); }} /></DialogFooter></Dialog>);
   const helper: string | null = t.help_agent_id ?? null;
   const reassignable = t.status === 'todo' || (t.status === 'blocked' && t.blocked_reason !== 'help');
   const reassignTo = enabledWorkers.filter((a: any) => a.id !== helper && a.id !== t.assignee_agent_id);
   const cancelJob = (j: any) => setDlg(<Dialog title="Cancel this job?" onClose={() => setDlg(null)}>
-    {j.status === 'running' && ['work', 'review'].includes(j.kind) && <p className="text-sm mb-3">T-{id} becomes Blocked: you cancelled the run</p>}
-    <div className="flex justify-end gap-2"><button className="btn bg-slate-700" data-autofocus onClick={() => setDlg(null)}>Keep</button>
-      <ActionButton label="Cancel job" kind="danger" run={async () => { await api(`/api/jobs/${j.id}`, { body: { action: 'cancel' } }); await refresh(); setDlg(null); }} /></div></Dialog>);
+    {j.status === 'running' && ['work', 'review'].includes(j.kind) && <p className="text-body text-fg-secondary mb-3">T-{id} becomes Blocked: you cancelled the run</p>}
+    <DialogFooter><button className="btn btn-secondary" data-autofocus onClick={() => setDlg(null)}>Keep</button>
+      <ActionButton label="Cancel job" kind="danger" run={async () => { await api(`/api/jobs/${j.id}`, { body: { action: 'cancel' } }); await refresh(); setDlg(null); }} /></DialogFooter></Dialog>);
   const lastArt = data.artifacts.filter((a: any) => a.verdict !== 'superseded').slice(-1)[0];
   const actions: React.ReactNode[] = [];
   if (t.status === 'proposed' && data.approval?.status === 'pending') {
@@ -179,51 +194,60 @@ function TaskPane({ id }: { id: number }) {
     toast(r.resumed ? `Thread reopened. T-${id} will resume.` : r.status === 'capped' ? `Thread reopened but still capped. T-${id} will not resume.` : 'Thread reopened.'); }} />);
   if (card.waiting?.action === 'raise_cap') actions.push(<ActionButton key="rc" label="Raise cap" run={async () => { const r: any = await api(`/api/threads/${t.thread_id}`, { body: { action: 'raise_cap' } }); await refresh();
     toast(r.resumed ? `Cap raised. T-${id} will resume.` : 'Cap raised.'); }} />);
-  if (!['done', 'cancelled'].includes(t.status)) actions.push(<ActionButton key="cx" label="Cancel task" kind="danger" run={async () => cancel()} />);
-  if (lastArt) actions.push(<button key="df" data-shortcut="d" className="btn bg-slate-700" onClick={() => open({ kind: 'review', id: lastArt.id })}>View diff <kbd className="opacity-60 text-[10px]">d</kbd></button>);
+  if (!['done', 'cancelled'].includes(t.status)) actions.push(<ActionButton key="cx" label="Cancel task" kind="danger-ghost" run={async () => cancel()} />);
+  if (lastArt) actions.push(<button key="df" data-shortcut="d" aria-keyshortcuts="d" className="btn btn-secondary" onClick={() => open({ kind: 'review', id: lastArt.id })}>View diff <kbd aria-hidden className="kbd">d</kbd></button>);
   return (
     <PaneShell title={<>T-{t.id} · <TaskStatus s={t.status} /> · assignee: {t.assignee_agent_id}{card.round ? ` · ${card.round}` : ''}</>}
-      footer={<div className="p-3 border-t border-slate-700 flex flex-wrap gap-2">{actions}</div>}>
-      <div className="p-3 space-y-3 text-sm">
-        {card.reason && <p className="text-rose-200"><span aria-hidden>⏸</span> {card.reason}</p>}
-        {card.waiting && <p className="text-amber-200"><span aria-hidden>⏸</span> {card.waiting.text}</p>}
-        {card.queued && <p className="text-amber-200">Queued: {card.queued}{' '}
-          {card.queued === 'agent budget' && <button className="underline text-sky-300" onClick={() => openSettingsAgent({ agent: t.assignee_agent_id, field: 'usd' })}>Edit budget</button>}
-          {card.queued === 'disabled' && <button className="underline text-sky-300" onClick={() => openSettingsAgent({ agent: t.assignee_agent_id, field: 'enabled' })}>Enable</button>}</p>}
-        {t.status === 'blocked' && t.blocked_reason === 'help' && <p className="text-slate-300">Waiting on {helper ?? 'the helper'}; reroute help or reply first</p>}
-        {card.peer_help?.status === 'queued' && <p><ActionButton label="Ask the director instead" run={async () => {
+      footer={<div className="shrink-0 border-t border-separator px-4 py-3 flex flex-wrap items-center gap-2 bg-content">{actions}</div>}>
+      <div className="px-4 py-4 flex flex-col gap-5 text-body">
+        {(card.reason || card.waiting || card.queued || (t.status === 'blocked' && t.blocked_reason === 'help') || card.peer_help?.status === 'queued' || (reassignable && agentTop)) && <div className="flex flex-col gap-2">
+        {card.reason && <p className="flex items-start gap-1.5 text-callout text-danger"><Icon as={CirclePause} size={14} className="mt-px" /> {card.reason}</p>}
+        {card.waiting && <p className="flex items-start gap-1.5 text-callout text-status-warn"><Icon as={CirclePause} size={14} className="mt-px" /> {card.waiting.text}</p>}
+        {card.queued && <p className="flex items-start gap-1.5 text-callout text-fg-secondary"><Icon as={Clock} size={14} className="mt-px" /><span>Queued: {card.queued}{' '}
+          {card.queued === 'agent budget' && <button className="btn btn-link text-callout inline" onClick={() => openSettingsAgent({ agent: t.assignee_agent_id, field: 'usd' })}>Edit budget</button>}
+          {card.queued === 'disabled' && <button className="btn btn-link text-callout inline" onClick={() => openSettingsAgent({ agent: t.assignee_agent_id, field: 'enabled' })}>Enable</button>}</span></p>}
+        {t.status === 'blocked' && t.blocked_reason === 'help' && <p className="text-callout text-fg-secondary">Waiting on {helper ?? 'the helper'}; reroute help or reply first</p>}
+        {card.peer_help?.status === 'queued' && <p><ActionButton small label="Ask the director instead" run={async () => {
           try { await post('reroute_help'); toast(`Asking the director instead of ${card.peer_help.agent}`); }
           catch (e: any) { if (e.code === 'help_running') { toast(`${card.peer_help.agent} is answering right now`, 'error'); return; } throw e; } }} /></p>}
-        {reassignable && agentTop && <p className="text-slate-300">Proposed by the director; to move it, cancel and ask the director to re-propose.</p>}
+        {reassignable && agentTop && <p className="text-callout text-fg-secondary">Proposed by the director; to move it, cancel and ask the director to re-propose.</p>}
+        </div>}
         {reassignable && !agentTop && (enabledWorkers.length === 0
-          ? <p className="text-amber-200">No worker is enabled. <button className="underline text-sky-300" onClick={() => openSettingsAgent({ agent: t.assignee_agent_id, field: 'enabled' })}>Enable</button></p>
-          : <div><label htmlFor="reassign" className="text-xs uppercase text-slate-400 mr-2">Reassign</label>
-              <select id="reassign" className="input" value="" onChange={async (e) => {
+          ? <p className="text-callout text-fg-secondary">No worker is enabled. <button className="btn btn-link text-callout inline" onClick={() => openSettingsAgent({ agent: t.assignee_agent_id, field: 'enabled' })}>Enable</button></p>
+          : <div className="flex items-center gap-2"><label htmlFor="reassign" className="text-callout text-fg-secondary">Reassign</label>
+              <SelectWrap><select id="reassign" className="input select w-auto" value="" onChange={async (e) => {
                 const to = e.target.value; if (!to) return; setRsErr(null);
                 try { await api(`/api/tasks/${id}`, { body: { action: 'reassign', assignee: to } }); await refresh(); toast(`T-${id} reassigned to ${to}`); }
                 catch (er: any) { setRsErr(er.hint || er.code); } }}>
                 <option value="">Reassign…</option>{reassignTo.map((a: any) => <option key={a.id} value={a.id}>{a.display_name}</option>)}</select>
-              {rsErr && <span role="alert" className="text-xs text-rose-300 ml-2">{rsErr}</span>}</div>)}
-        <h3 className="font-semibold text-base">{t.title}</h3>
-        <button className="text-xs underline" onClick={() => open({ kind: 'thread', id: t.thread_id })}>Open thread</button>
-        {t.parent_id && <p className="text-xs"><button className="underline" onClick={() => open({ kind: 'task', id: t.parent_id })}>↳ subtask of T-{t.parent_id}</button></p>}
-        <div><h4 className="text-xs uppercase text-slate-400">Description</h4><p className="whitespace-pre-wrap">{t.description || '—'}</p></div>
-        <div><h4 className="text-xs uppercase text-slate-400">Acceptance</h4><p className="whitespace-pre-wrap">{t.acceptance || '—'}</p></div>
-        {data.children.length > 0 && <div><h4 className="text-xs uppercase text-slate-400">Subtasks</h4><ul>{data.children.map((c: any) =>
-          <li key={c.id}><button className="underline" onClick={() => open({ kind: 'task', id: c.id })}>T-{c.id} {c.title}</button> · <TaskStatus s={c.status} /></li>)}</ul></div>}
-        <div><h4 className="text-xs uppercase text-slate-400">Notes (latest 10)</h4>
-          {data.notes.length ? <ul className="space-y-1">{data.notes.map((n: any) => <li key={n.id}><span className="text-slate-400">{n.author_agent_id ?? 'you'}:</span> <span className="whitespace-pre-wrap">{n.body}</span></li>)}</ul> : <p className="text-slate-400">None.</p>}</div>
-        <div><h4 className="text-xs uppercase text-slate-400">Jobs</h4>
-          <table className="w-full text-xs"><tbody>{data.jobs.map((j: any) => (
-            <tr key={j.id} className="border-b border-slate-800">
-              <td className="py-1">{j.kind}</td><td>{j.agent_id}</td><td>attempt {j.attempts}/{j.max_attempts}</td>
-              <td><span aria-hidden>{JOB_ICON[j.status]}</span> {j.status}{j.failure_kind ? ` (${j.failure_kind})` : ''}</td>
-              <td>{j.status === 'running' ? `cap ${usd(j.budget_cap_usd)}` : `${usd(j.cost_usd)} est.`}</td>
-              <td className="text-right space-x-1">
-                {['queued', 'running'].includes(j.status) && <ActionButton label="Cancel job" run={async () => cancelJob(j)} />}
-                {j.status === 'queued' && j.attempts > 0 && <ActionButton label="Retry now" run={async () => { await api(`/api/jobs/${j.id}`, { body: { action: 'retry_now' } }); await refresh(); }} />}
-                {j.attempts > 0 && <button className="underline" onClick={() => open({ kind: 'log', id: j.id })}>Open log</button>}
-              </td></tr>))}</tbody></table></div>
+              </SelectWrap>
+              {rsErr && <span role="alert" className="field-error mt-0">{rsErr}</span>}</div>)}
+        <div>
+          <h3 className="text-headline">{t.title}</h3>
+          <div className="mt-1 flex items-center gap-3">
+            <button className="btn btn-link text-callout" onClick={() => open({ kind: 'thread', id: t.thread_id })}>Open thread</button>
+            {t.parent_id && <button className="btn btn-link text-callout" onClick={() => open({ kind: 'task', id: t.parent_id })}><Icon as={CornerDownRight} size={14} /> subtask of T-{t.parent_id}</button>}
+          </div>
+        </div>
+        <div><h4 className={SECTION}>Description</h4><p className="text-body-lg whitespace-pre-wrap">{t.description || '—'}</p></div>
+        <div><h4 className={SECTION}>Acceptance</h4><p className="text-body-lg whitespace-pre-wrap">{t.acceptance || '—'}</p></div>
+        {data.children.length > 0 && <div><h4 className={SECTION}>Subtasks</h4><ul className="space-y-1">{data.children.map((c: any) =>
+          <li key={c.id} className="flex items-center gap-2"><button className="btn btn-link" onClick={() => open({ kind: 'task', id: c.id })}>T-{c.id} {c.title}</button> · <TaskStatus s={c.status} /></li>)}</ul></div>}
+        <div><h4 className={SECTION}>Notes (latest 10)</h4>
+          {data.notes.length ? <ul className="space-y-1">{data.notes.map((n: any) => <li key={n.id}><span className="text-fg-tertiary">{n.author_agent_id ?? 'you'}:</span> <span className="whitespace-pre-wrap">{n.body}</span></li>)}</ul> : <p className="text-fg-tertiary">None.</p>}</div>
+        <div><h4 className={SECTION}>Jobs</h4>
+          <div className="overflow-x-auto"><table className="w-full text-callout"><tbody>{data.jobs.map((j: any) => {
+            const [JI, jc] = JOB_ICON[j.status] ?? [Circle, ''];
+            return (
+            <tr key={j.id} className="h-8 border-b border-separator whitespace-nowrap">
+              <td className="pr-3">{j.kind}</td><td className="pr-3">{j.agent_id}</td><td className="pr-3 tabular-nums text-fg-secondary">attempt {j.attempts}/{j.max_attempts}</td>
+              <td className="pr-3"><span className="inline-flex items-center gap-1"><span className={jc}><Icon as={JI} size={14} /></span> {j.status}{j.failure_kind ? ` (${j.failure_kind})` : ''}</span></td>
+              <td className="pr-3 tabular-nums text-fg-secondary">{j.status === 'running' ? `cap ${usd(j.budget_cap_usd)}` : `${usd(j.cost_usd)} est.`}</td>
+              <td className="text-right"><span className="inline-flex gap-1 items-center">
+                {['queued', 'running'].includes(j.status) && <ActionButton small label="Cancel job" run={async () => cancelJob(j)} />}
+                {j.status === 'queued' && j.attempts > 0 && <ActionButton small label="Retry now" run={async () => { await api(`/api/jobs/${j.id}`, { body: { action: 'retry_now' } }); await refresh(); }} />}
+                {j.attempts > 0 && <button className="btn btn-link text-callout" onClick={() => open({ kind: 'log', id: j.id })}>Open log</button>}
+              </span></td></tr>); })}</tbody></table></div></div>
       </div>
       {dlg}
     </PaneShell>
@@ -242,13 +266,14 @@ function ReviewPane({ id }: { id: number }) {
   useEffect(() => { if (first.current) { first.current = false; return; }
     setTimeout(() => (expanded ? document.querySelector<HTMLElement>('aside[aria-label="Detail"] h2') : expandBtn.current)?.focus(), 0); }, [expanded]);
   useEffect(() => () => { set({ diffExpanded: false }); }, [set]);
-  if (err && !data) return <PaneShell title="Review"><p role="alert" className="p-4 text-rose-300">Couldn&apos;t load diff ({err}). <button className="underline" onClick={() => load()}>Retry</button></p></PaneShell>;
-  if (!data) return <PaneShell title="Review"><p className="p-4 text-slate-400" aria-busy="true">Loading diff…</p></PaneShell>;
+  if (err && !data) return <PaneShell title="Review"><p role="alert" className="p-4 text-body text-danger">Couldn&apos;t load diff ({err}). <button className="btn btn-link inline" onClick={() => load()}>Retry</button></p></PaneShell>;
+  if (!data) return <PaneShell title="Review"><p className="p-4 text-callout text-fg-tertiary" aria-busy="true">Loading diff…</p></PaneShell>;
   const v = data.verdict;
-  const verdict = v === 'approved' ? <><span aria-hidden>✓</span> Approved by {data.verdict_by}</>
-    : v === 'changes_requested' ? <><span aria-hidden>↺</span> Changes requested by {data.verdict_by}{data.review_round === 2 ? ' · Round 2 of 2 · review limit reached' : ''}</>
-    : v === 'superseded' ? <><span aria-hidden>⟲</span> Set aside: workspace changed before review; round redone</>
-    : <><span aria-hidden>◐</span> Awaiting director review</>;
+  const vpill = (cls: string, I: typeof Eye) => `pill ${cls}`;
+  const verdict = v === 'approved' ? <span className={vpill('bg-status-done/[.12] text-status-done', CircleCheck)}><Icon as={CircleCheck} size={14} />Approved by {data.verdict_by}</span>
+    : v === 'changes_requested' ? <span className={vpill('bg-status-blocked/[.12] text-status-blocked', CircleX)}><Icon as={CircleX} size={14} />Changes requested by {data.verdict_by}{data.review_round === 2 ? ' · Round 2 of 2 · review limit reached' : ''}</span>
+    : v === 'superseded' ? <span className={vpill('bg-tint-warn text-status-warn', RotateCcw)}><Icon as={RotateCcw} size={14} />Set aside: workspace changed before review; round redone</span>
+    : <span className={vpill('bg-status-review/[.12] text-status-review', Eye)}><Icon as={Eye} size={14} />Awaiting director review</span>;
   const post = async (action: string, note?: string) => { const r = await api(`/api/tasks/${data.task_id}`, { body: { action, note } }); await refresh(); return r; };
   let footer: React.ReactNode = null;
   if (data.current && data.task_status === 'done' && !data.parent_id && !data.accepted_at) footer = <>
@@ -256,13 +281,13 @@ function ReviewPane({ id }: { id: number }) {
     <ActionButton label="Reopen with note" shortcut="r" run={async () => setDlg(<NoteDialog title="Reopen" label="What should change? (required)" confirm="Reopen" onClose={() => setDlg(null)} onDone={(n) => post('reopen', n)} />)} /></>;
   else if (data.current && data.task_status === 'blocked' && data.blocked_reason === 'review_cap') footer = <>
     <ActionButton label="Send back with note" shortcut="r" run={async () => setDlg(<NoteDialog title="Send back" label="Note (required). Review rounds reset to 0 of 2." confirm="Send back" onClose={() => setDlg(null)} onDone={async (n) => toast(retryToast(await post('unblock', n), data.task_id))} />)} />
-    <ActionButton label="Cancel task" kind="danger" run={async () => { await post('cancel'); }} /></>;
+    <ActionButton label="Cancel task" kind="danger-ghost" run={async () => { await post('cancel'); }} /></>;
   return (
-    <PaneShell title={<>Review · T-{data.task_id} · round {data.review_round} of 2</>} footer={footer && <div className="p-3 border-t border-slate-700 flex gap-2">{footer}</div>}
-      actions={<button ref={expandBtn} className="btn bg-slate-700" aria-expanded={expanded} onClick={toggle}>{expanded ? '⤡ Collapse' : '⤢ Expand'} <kbd className="opacity-60 text-[10px] ml-1">x</kbd></button>}>
-      <div className="p-3 text-sm space-y-2">
-        <p>Verdict: {verdict} · <span className="text-slate-400">Captured by server <Time t={data.created_at} now={boot.now} /></span></p>
-        {data.verdict_note && <p className="whitespace-pre-wrap">Reviewer notes: &ldquo;{data.verdict_note}&rdquo;</p>}
+    <PaneShell title={<>Review · T-{data.task_id} · round {data.review_round} of 2</>} footer={footer && <div className="shrink-0 border-t border-separator px-4 py-3 flex items-center gap-2 bg-content">{footer}</div>}
+      actions={<button ref={expandBtn} className="btn btn-ghost btn-sm" aria-expanded={expanded} aria-keyshortcuts="x" onClick={toggle}><Icon as={expanded ? Minimize2 : Maximize2} size={14} />{expanded ? 'Collapse' : 'Expand'} <kbd aria-hidden className="kbd">x</kbd></button>}>
+      <div className="px-4 py-3 text-body space-y-2">
+        <p className="flex flex-wrap items-center gap-x-2 gap-y-1">Verdict: {verdict} <span className="text-caption text-fg-tertiary">Captured by server <Time t={data.created_at} now={boot.now} /></span></p>
+        {data.verdict_note && <p className="whitespace-pre-wrap text-fg-secondary">Reviewer notes: &ldquo;{data.verdict_note}&rdquo;</p>}
       </div>
       <DiffView data={data} show={show} setShow={setShow} reload={() => load()} expanded={expanded} toggleExpand={toggle} />
       {dlg}
@@ -272,13 +297,13 @@ function ReviewPane({ id }: { id: number }) {
 
 function LogPane({ id }: { id: number }) {
   const { data, err } = useFetch<any>(`/api/jobs/${id}/log`);
-  if (err) return <PaneShell title={`Log · job ${id}`}><p role="alert" className="p-4 text-rose-300">Couldn&apos;t load log ({err}).</p></PaneShell>;
-  if (!data) return <PaneShell title={`Log · job ${id}`}><p className="p-4 text-slate-400">Loading…</p></PaneShell>;
+  if (err) return <PaneShell title={`Log · job ${id}`}><p role="alert" className="p-4 text-body text-danger">Couldn&apos;t load log ({err}).</p></PaneShell>;
+  if (!data) return <PaneShell title={`Log · job ${id}`}><p className="p-4 text-callout text-fg-tertiary">Loading…</p></PaneShell>;
   return (
     <PaneShell title={<>Log · {data.agent_id} {data.kind} · job {id}</>}>
-      <p className="p-3 text-sm">Status: {data.status}{data.failure_kind ? ` · Failed: ${data.failure_kind}` : ''}{data.exit_code != null ? ` · exit ${data.exit_code}` : ''}</p>
-      {data.error && <pre className="px-3 text-xs text-rose-200 whitespace-pre-wrap">{data.error}</pre>}
-      <pre className="text-xs font-mono p-3 whitespace-pre-wrap break-all">{data.lines.length ? data.lines.join('\n') : 'No transcript lines.'}</pre>
+      <p className="px-4 py-3 text-body">Status: {data.status}{data.failure_kind ? ` · Failed: ${data.failure_kind}` : ''}{data.exit_code != null ? ` · exit ${data.exit_code}` : ''}</p>
+      {data.error && <pre className="px-4 text-callout text-danger whitespace-pre-wrap">{data.error}</pre>}
+      <pre className="font-mono text-mono mx-4 mb-4 rounded-md bg-sunken p-3 whitespace-pre-wrap break-all">{data.lines.length ? data.lines.join('\n') : 'No transcript lines.'}</pre>
     </PaneShell>
   );
 }
@@ -293,18 +318,18 @@ function NewTaskPane() {
   const { openSettingsAgent } = useStore();
   return (
     <PaneShell title="New task">
-      <form className="p-3 space-y-3 text-sm" onSubmit={(e) => e.preventDefault()}>
-        <div><label htmlFor="nt-title" className="block mb-1">Title (required)</label><input id="nt-title" className="input w-full" value={f.title} onChange={(e) => setF({ ...f, title: e.target.value })} /></div>
-        <div><label htmlFor="nt-desc" className="block mb-1">Description</label><textarea id="nt-desc" className="input w-full h-24" value={f.description} onChange={(e) => setF({ ...f, description: e.target.value })} /></div>
-        <div><label htmlFor="nt-acc" className="block mb-1">Acceptance criteria</label><textarea id="nt-acc" className="input w-full h-20" value={f.acceptance} onChange={(e) => setF({ ...f, acceptance: e.target.value })} /></div>
-        <div><label htmlFor="nt-as" className="block mb-1">Assignee</label>
+      <form className="px-4 py-4 flex flex-col gap-4 text-body" onSubmit={(e) => e.preventDefault()}>
+        <div><label htmlFor="nt-title" className="field-label block mb-1.5">Title (required)</label><input id="nt-title" className="input" value={f.title} onChange={(e) => setF({ ...f, title: e.target.value })} /></div>
+        <div><label htmlFor="nt-desc" className="field-label block mb-1.5">Description</label><textarea id="nt-desc" className="textarea h-24" value={f.description} onChange={(e) => setF({ ...f, description: e.target.value })} /></div>
+        <div><label htmlFor="nt-acc" className="field-label block mb-1.5">Acceptance criteria</label><textarea id="nt-acc" className="textarea h-20" value={f.acceptance} onChange={(e) => setF({ ...f, acceptance: e.target.value })} /></div>
+        <div><label htmlFor="nt-as" className="field-label block mb-1.5">Assignee</label>
           {enabled.length === 0
-            ? <p id="nt-as-none" className="text-sm text-amber-200">No worker is enabled. <button type="button" className="underline text-sky-300" onClick={() => openSettingsAgent({ agent: boot.agents.find((a: any) => a.role === 'worker' && !a.retired_at)?.id ?? 'worker', field: 'enabled' })}>Enable</button></p>
-            : <select id="nt-as" className="input" value={assignee} onChange={(e) => setF({ ...f, assignee: e.target.value })}>
-                {enabled.map((a: any) => <option key={a.id} value={a.id}>{a.display_name}</option>)}</select>}</div>
+            ? <p id="nt-as-none" className="text-callout text-fg-secondary">No worker is enabled. <button type="button" className="btn btn-link text-callout inline" onClick={() => openSettingsAgent({ agent: boot.agents.find((a: any) => a.role === 'worker' && !a.retired_at)?.id ?? 'worker', field: 'enabled' })}>Enable</button></p>
+            : <SelectWrap className="block"><select id="nt-as" className="input select" value={assignee} onChange={(e) => setF({ ...f, assignee: e.target.value })}>
+                {enabled.map((a: any) => <option key={a.id} value={a.id}>{a.display_name}</option>)}</select></SelectWrap>}</div>
         <ActionButton label="Create" kind="primary" disabled={!f.title.trim() || enabled.length === 0} title={enabled.length === 0 ? 'No worker is enabled' : undefined} run={async () => {
           const r: any = await api('/api/tasks', { body: { ...f, assignee } }); await refresh(); toast(`T-${r.task_id} created`); open({ kind: 'task', id: r.task_id }); }} />
-        <p className="text-xs text-slate-400">Will wake {assignee || 'the assignee'}. Lands in To do; no approval needed (you are acting).</p>
+        <p className="field-hint">Will wake {assignee || 'the assignee'}. Lands in To do; no approval needed (you are acting).</p>
       </form>
     </PaneShell>
   );

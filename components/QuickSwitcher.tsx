@@ -33,16 +33,16 @@ export function QuickSwitcher({ onClose }: { onClose: () => void }) {
     else if (ev.key === 'Enter') { ev.preventDefault(); choose(shown[active]); }
   };
   return (
-    <Dialog title="Quick switcher" onClose={onClose}>
+    <Dialog title="Quick switcher" onClose={onClose} wide hideTitle>
       <input data-autofocus role="combobox" aria-label="Go to channel, task, or agent" aria-expanded="true" aria-controls="qs-list" aria-autocomplete="list"
-        aria-activedescendant={shown[active] ? `qs-${shown[active].id}` : undefined} className="input w-full mb-2" placeholder="Type a task, #channel or @agent…"
+        aria-activedescendant={shown[active] ? `qs-${shown[active].id}` : undefined} className="block w-full h-11 px-4 text-body-lg bg-transparent text-fg-primary placeholder:text-fg-tertiary border-b border-separator focus:outline-none" placeholder="Type a task, #channel or @agent…"
         value={q} onChange={(e) => setQ(e.target.value)} onKeyDown={onKey} />
-      <ul id="qs-list" ref={listRef} role="listbox" aria-label="Results" className="max-h-72 overflow-y-auto">
-        {shown.length === 0 && <li role="presentation" className="text-sm text-slate-400 p-2">No matches.</li>}
+      <ul id="qs-list" ref={listRef} role="listbox" aria-label="Results" className="max-h-72 overflow-y-auto py-1">
+        {shown.length === 0 && <li role="presentation" className="text-body text-fg-secondary px-4 py-3">No matches.</li>}
         {shown.map((x, i) => (
           <li key={x.id} id={`qs-${x.id}`} role="option" aria-selected={i === active} onMouseEnter={() => setActive(i)} onClick={() => choose(x)}
-            className={`flex justify-between gap-3 px-2 py-1 text-sm cursor-pointer rounded ${i === active ? 'bg-sky-800' : ''}`}>
-            <span className="truncate">{x.label}</span><span className="text-xs text-slate-400 shrink-0">{x.hint ? `${x.hint} · ` : ''}{x.group}</span>
+            className={`flex h-9 items-center justify-between gap-3 px-4 text-body cursor-pointer ${i === active ? 'bg-accent-fill text-fg-on-accent' : ''}`}>
+            <span className="truncate">{x.label}</span><span className={`text-callout shrink-0 ${i === active ? 'text-fg-on-accent/90' : 'text-fg-secondary'}`}>{x.hint ? `${x.hint} · ` : ''}{x.group}</span>
           </li>))}
       </ul>
     </Dialog>

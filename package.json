@@ -13,11 +13,13 @@
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "test:a11y": "node test/playwright/diff-keyboard.mjs",
-    "test:e2e": "(test -f .next/BUILD_ID || next build) && npm run build:orch && vitest run -c vitest.e2e.config.ts"
+    "test:e2e": "(test -f .next/BUILD_ID || next build) && npm run build:orch && vitest run -c vitest.e2e.config.ts",
+    "screenshots": "node test/playwright/screenshots.mjs"
   },
   "dependencies": {
     "better-sqlite3": "^11.7.0",
     "highlight.js": "^11.12.0",
+    "lucide-react": "0.468.0",
     "next": "14.2.35",
     "react": "18.3.1",
     "react-dom": "18.3.1",

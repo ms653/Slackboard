@@ -1,7 +1,8 @@
 'use client';
 import { useEffect, useRef, useState } from 'react';
 import { useStore } from './store';
-import { Presence, presenceLabel, hhmm, usd } from './ui';
+import { ChevronRight, Plus } from 'lucide-react';
+import { Icon, SECTION_LABEL, presenceIcon, presenceLabel, presenceTone, hhmm, usd } from './ui';
 import { PAUSE_LABEL } from './Header';
 
 /** Sub-lines under an agent row (PHASE2 §B1): always text. Returns the plain strings; actions are rendered separately. */
@@ -52,32 +53,41 @@ export function AgentsList({ now }: { now: number }) {
   const row = (a: any) => {
     const lines = agentLines(a);
     const reason = a.queue_reason as string | null;
+    const I = presenceIcon(a.presence);
+    const bad = a.presence === 'blocked' || a.presence === 'failed';
     return (
-      <li key={a.id} className="px-1">
-        <button data-agent-row={a.id} className="w-full text-left px-2 py-1 rounded hover:bg-slate-800 focus:outline focus:outline-2 focus:outline-sky-400"
+      <li key={a.id} className="flex flex-col">
+        <button data-agent-row={a.id} className="focus-inset flex w-full items-start gap-2 rounded-md px-2 py-1.5 text-left hover:bg-fill transition-colors duration-fast ease-out"
           aria-label={rowName(a)} onClick={() => openAgent(a)}>
-          <div className="font-medium">{a.display_name}</div>
-          <div className="text-xs"><Presence a={a} now={now} pauseLabel={pauseLabel} /></div>
-          {lines.map((l) => <div key={l} className="text-xs text-slate-400 truncate">{l}</div>)}
+          <span className={`mt-px ${presenceTone(a.presence)}`}><Icon as={I} className={a.presence === 'working' ? 'animate-pulse' : ''} /></span>
+          <span className="min-w-0 flex-1">
+            <span className="flex items-baseline gap-1.5">
+              <span className="text-body font-medium text-fg-primary">{a.display_name}</span>
+              <span className={`text-callout truncate ${bad ? 'text-danger' : 'text-fg-secondary'}`}>{presenceLabel(a, now, pauseLabel)}</span>
+            </span>
+            {lines.map((l) => <span key={l} className="block text-caption text-fg-tertiary truncate">{l}</span>)}
+          </span>
         </button>
-        {reason === 'agent budget' && a.presence !== 'working' &&
-          <button className="ml-2 text-xs underline text-sky-300" aria-label={`Edit budget for ${a.id}`} onClick={() => openSettingsAgent({ agent: a.id, field: 'usd' })}>Edit budget</button>}
-        {reason === 'disabled' && a.role === 'worker' && !a.retired_at &&
-          <button className="ml-2 text-xs underline text-sky-300" aria-label={`Enable ${a.id}`} onClick={() => openSettingsAgent({ agent: a.id, field: 'enabled' })}>Enable</button>}
+        {((reason === 'agent budget' && a.presence !== 'working') || (reason === 'disabled' && a.role === 'worker' && !a.retired_at)) && <div className="pl-8 pb-1 flex gap-1">
+          {reason === 'agent budget' && a.presence !== 'working' &&
+            <button className="btn btn-link text-callout" aria-label={`Edit budget for ${a.id}`} onClick={() => openSettingsAgent({ agent: a.id, field: 'usd' })}>Edit budget</button>}
+          {reason === 'disabled' && a.role === 'worker' && !a.retired_at &&
+            <button className="btn btn-link text-callout" aria-label={`Enable ${a.id}`} onClick={() => openSettingsAgent({ agent: a.id, field: 'enabled' })}>Enable</button>}
+        </div>}
       </li>);
   };
   return (
     <section aria-labelledby="agents-h">
-      <h2 id="agents-h" className="mt-4 mb-1 px-3 text-xs uppercase tracking-wide text-slate-400">Agents <span className="normal-case">1 director · {workers.length}/3 workers</span></h2>
+      <h2 id="agents-h" className={SECTION_LABEL}>Agents <span className="font-normal">1 director · {workers.length}/3 workers</span></h2>
       <ul aria-label={`Agents, 1 director, ${workers.length} of 3 workers`} onKeyDown={onKey} data-agents-list>{live.map(row)}</ul>
       {workers.length === 1 && (
-        <p className="px-3 mt-1 text-xs text-slate-400">1 worker. The director can propose more (you approve).{' '}
-          <button className="underline text-sky-300" onClick={() => { openSettingsAgent({ agent: '+add', field: 'row' }); setView('settings'); }}>Add worker</button></p>)}
+        <div className="px-2 pt-2 text-caption text-fg-tertiary">1 worker. The director can propose more (you approve).{' '}
+          <button className="btn btn-secondary btn-sm mt-2" onClick={() => { openSettingsAgent({ agent: '+add', field: 'row' }); setView('settings'); }}><Icon as={Plus} size={14} />Add worker</button></div>)}
       {retired.length > 0 && (
-        <div className="px-3 mt-1 text-xs">
-          <button aria-expanded={showRetired} aria-controls="retired-list" className="text-slate-400 hover:underline" onClick={() => setShowRetired((v) => !v)}>
-            <span aria-hidden>{showRetired ? '▾' : '▸'}</span> Retired ({retired.length})</button>
-          {showRetired && <ul id="retired-list" className="mt-1 space-y-0.5 text-slate-400">{retired.map((a) => <li key={a.id}>{a.display_name} <span>retired {hhmm(a.retired_at)}</span></li>)}</ul>}
+        <div className="mt-1">
+          <button aria-expanded={showRetired} aria-controls="retired-list" className="flex h-7 w-full items-center gap-1.5 rounded-md px-2 text-callout text-fg-tertiary hover:bg-fill" onClick={() => setShowRetired((v) => !v)}>
+            <Icon as={ChevronRight} size={14} className={`transition-transform duration-fast ${showRetired ? 'rotate-90' : ''}`} /> Retired ({retired.length})</button>
+          {showRetired && <ul id="retired-list" className="mt-0.5">{retired.map((a) => <li key={a.id} className="px-2 pl-7 py-1 text-fg-tertiary"><span className="block text-callout">{a.display_name}</span> <span className="block text-caption">retired {hhmm(a.retired_at)}</span></li>)}</ul>}
         </div>)}
       <div className="sr-only" aria-live="polite" role="status">{announce}</div>
     </section>

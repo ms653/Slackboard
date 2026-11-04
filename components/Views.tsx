@@ -3,7 +3,8 @@ import { useEffect, useRef, useState } from 'react';
 import { useStore } from './store';
 import { api } from './api';
 import { Composer } from './Composer';
-import { ActionButton, Dialog, NoteDialog, Presence, TaskStatus, Time, usd } from './ui';
+import { CircleCheck, CirclePause, CircleX, Clock, CornerDownRight, Flag, MessageSquare, Plus, TriangleAlert } from 'lucide-react';
+import { ActionButton, Avatar, Dialog, DialogFooter, GlyphIcon, Icon, NoteDialog, Presence, Rich, RoleChip, STATUS_ICON, STATUS_ICON_CLS, TaskStatus, Time, usd } from './ui';
 import { retryToast } from './NeedsYou';
 import { AgentsSettings } from './AgentsSettings';
 import { dropMove, parseDragId, TASK_MIME } from './dnd';
@@ -20,21 +21,29 @@ export function Chat() {
   return (
     <section aria-labelledby="chat-h" className="h-full flex flex-col">
       <h2 id="chat-h" className="sr-only"># general</h2>
-      <ol className="flex-1 overflow-y-auto p-3 space-y-3" aria-live="polite">
-        {roots.length === 0 && <li className="text-center text-slate-400 p-8">Say what you need. Mention @director to start.</li>}
-        {roots.map((th: any) => (
-          <li key={th.id} className="rounded hover:bg-slate-800/60 p-2">
-            <div className="text-xs text-slate-400 flex gap-2">
-              <span className="font-semibold text-slate-200">{th.first_author === 'user' ? 'You' : th.first_agent ?? 'system'}</span>
-              {th.last_at && <Time t={th.created_at} now={boot.now} />}
-              {th.status !== 'open' && <span>· thread {th.status}</span>}
+      <ol className="flex-1 overflow-y-auto overscroll-contain py-2" aria-live="polite">
+        {roots.length === 0 && <li className="mx-auto max-w-[320px] py-16 flex flex-col items-center text-center gap-2">
+          <span className="h-12 w-12 rounded-full bg-fill-strong grid place-items-center text-fg-tertiary"><Icon as={MessageSquare} size={24} /></span>
+          <span className="text-headline">Say what you need.</span> <span className="text-body text-fg-secondary">Mention @director to start.</span></li>}
+        {roots.map((th: any) => {
+          const you = th.first_author === 'user';
+          const who = you ? 'You' : th.first_agent ?? 'system';
+          return (
+          <li key={th.id} className="group flex gap-3 px-5 py-1.5 hover:bg-fill/60 transition-colors duration-fast">
+            <Avatar name={who} you={you} />
+            <div className="min-w-0 max-w-[72ch]">
+              <div className="flex items-baseline gap-2">
+                <span className="text-body font-semibold text-fg-primary">{who}</span>
+                {!you && <RoleChip>{th.first_agent ? (th.first_agent === 'director' ? 'director' : 'worker') : 'system'}</RoleChip>}
+                {th.last_at && <span className="text-caption text-fg-tertiary tabular-nums"><Time t={th.created_at} now={boot.now} /></span>}
+                {th.status !== 'open' && <span className="text-caption text-fg-tertiary">· thread {th.status}</span>}
+              </div>
+              <div className="text-body-lg text-fg-primary whitespace-pre-wrap break-words line-clamp-3"><Rich text={th.first_body ?? th.title} /></div>
+              <button className="btn btn-link text-callout mt-1" onClick={() => open({ kind: 'thread', id: th.id })}>
+                <Icon as={MessageSquare} size={14} /> {th.replies} message{th.replies === 1 ? '' : 's'}{th.task_id ? ` · T-${th.task_id}` : ''} — open thread
+              </button>
             </div>
-            <div className="text-sm whitespace-pre-wrap line-clamp-3">{th.first_body ?? th.title}</div>
-            <button className="text-xs text-sky-300 hover:underline mt-1" onClick={() => open({ kind: 'thread', id: th.id })}>
-              <span aria-hidden>└</span> {th.replies} message{th.replies === 1 ? '' : 's'}{th.task_id ? ` · T-${th.task_id}` : ''} — open thread
-            </button>
-          </li>
-        ))}
+          </li>); })}
         <div ref={endRef} />
       </ol>
       <Composer threadId={null} threadStatus="open" label="Message #general… (@director to mention)"
@@ -59,9 +68,9 @@ export function TaskCard({ t, now }: { t: any; now: number }) {
     : post('unblock').then((r) => toast(retryToast(r, t.id)), (e) => toast(`Couldn't move T-${t.id}: ${e.hint || e.code}`, 'error'));
   const doReopen = () => setDlg(<NoteDialog title={`Reopen T-${t.id}`} label="What should change? (required)" confirm="Reopen" onClose={() => setDlg(null)} onDone={(n) => post('reopen', n)} />);
   const doCancel = () => setDlg(<Dialog title={`Cancel T-${t.id}?`} onClose={() => setDlg(null)}>
-    <p className="text-sm mb-3">Queued runs are cancelled and a running agent is stopped.</p>
-    <div className="flex justify-end gap-2"><button className="btn bg-slate-700" onClick={() => setDlg(null)}>Keep</button>
-      <ActionButton label="Cancel task" kind="danger" run={async () => { await post('cancel'); setDlg(null); toast(`T-${t.id} cancelled`); }} /></div></Dialog>);
+    <p className="text-body text-fg-secondary">Queued runs are cancelled and a running agent is stopped.</p>
+    <DialogFooter><button className="btn btn-secondary" onClick={() => setDlg(null)}>Keep</button>
+      <ActionButton label="Cancel task" kind="danger" run={async () => { await post('cancel'); setDlg(null); toast(`T-${t.id} cancelled`); }} /></DialogFooter></Dialog>);
   if (t.status === 'blocked') moves.push([t.blocked_reason === 'review_cap' ? 'Send back with note' : 'Unblock (retry)', doUnblock]);
   if (t.status === 'done' && !t.parent_id && !t.accepted_at) moves.push(['Accept', () => post('accept').then(() => toast(`T-${t.id} accepted`))]);
   if (t.status === 'done') moves.push(['Reopen with note', doReopen]);
@@ -76,23 +85,23 @@ export function TaskCard({ t, now }: { t: any; now: number }) {
   useEffect(() => () => { dropHandlers.delete(t.id); }, [t.id]);
   return (
     <li aria-label={name} data-task-card={t.id} tabIndex={0} draggable onDragStart={(e) => { e.dataTransfer.setData(TASK_MIME, String(t.id)); e.dataTransfer.effectAllowed = 'move'; }}
-      className="bg-slate-800 border border-slate-700 rounded p-2 text-sm focus:outline focus:outline-2 focus:outline-sky-400 cursor-pointer"
+      className="group relative rounded-lg bg-elevated p-3 shadow-sm hover:shadow-md active:shadow-lg active:rotate-[1deg] transition-shadow duration-fast cursor-pointer"
       onClick={() => open({ kind: 'task', id: t.id })}
       onKeyDown={(e) => { if (e.key === 'Enter') open({ kind: 'task', id: t.id }); if (e.key === 'm' && moves.length) { e.preventDefault(); setMenu(true); } }}>
-      <div className="flex justify-between gap-2 text-xs"><span className="font-mono">T-{t.id}</span><TaskStatus s={t.status} />{t.round && <span className="text-slate-400">{t.round}</span>}</div>
-      <div className="font-medium line-clamp-2 my-1">{t.title}</div>
-      {t.parent_id && <div className="text-xs text-slate-400"><span aria-hidden>↳</span> subtask of T-{t.parent_id}</div>}
-      <div className="text-xs text-slate-300">@{t.assignee_agent_id}{claimant && <> · <Presence a={claimant} now={now} /></>}</div>
-      <div className="text-xs text-slate-400">{t.replies} msgs · {t.files} file{t.files === 1 ? '' : 's'} · {usd(t.cost)} est.</div>
-      {t.reason && <div className="text-xs text-rose-200"><span aria-hidden>⏸</span> {t.reason}</div>}
-      {t.queued && <div className="text-xs text-amber-200">Queued: {t.queued}</div>}
-      {t.waiting && <div className="text-xs text-amber-200"><span aria-hidden>⏸</span> {t.waiting.text}</div>}
-      {t.done && <div className="text-xs text-emerald-200"><span aria-hidden>✓</span> {t.done}</div>}
-      {t.badge && <div className="text-xs text-amber-200"><span aria-hidden>{t.badge.icon}</span> {t.badge.text}{t.badge.retry && `. Retrying in ${Math.max(0, Math.ceil((t.badge.retry.run_after - now) / 1000))} s (${t.badge.retry.attempts}/${t.badge.retry.max_attempts})`}</div>}
-      {t.flag && <div className="text-xs font-semibold text-amber-300"><span aria-hidden>⚑</span> {t.flag}</div>}
-      {moves.length > 0 && <button className="text-xs underline mt-1" aria-haspopup="menu" onClick={(e) => { e.stopPropagation(); setMenu((m) => !m); }}>Move… <kbd>m</kbd></button>}
-      {menu && <ul role="menu" className="mt-1 bg-slate-900 border border-slate-600 rounded" onClick={(e) => e.stopPropagation()}>
-        {moves.map(([l, f]) => <li key={l} role="none"><button role="menuitem" className="w-full text-left px-2 py-1 hover:bg-slate-700" onClick={() => { setMenu(false); f(); }}>{l}</button></li>)}
+      <div className="flex items-center gap-2"><span className="font-mono text-caption text-fg-tertiary">T-{t.id}</span><TaskStatus s={t.status} />{t.round && <span className="ml-auto text-caption text-fg-tertiary tabular-nums">{t.round}</span>}</div>
+      <div className="mt-1.5 text-body font-semibold text-fg-primary line-clamp-2" title={t.title}>{t.title}</div>
+      {t.parent_id && <div className="mt-1 flex items-center gap-1 text-callout text-fg-secondary"><Icon as={CornerDownRight} size={14} className="text-fg-tertiary" /> subtask of T-{t.parent_id}</div>}
+      <div className="mt-2 flex items-center gap-2 text-callout text-fg-secondary">@{t.assignee_agent_id}{claimant && <> · <Presence a={claimant} now={now} /></>}</div>
+      <div className="mt-1 text-caption text-fg-tertiary tabular-nums">{t.replies} msgs · {t.files} file{t.files === 1 ? '' : 's'} · {usd(t.cost)} est.</div>
+      {t.reason && <div className="mt-2 flex items-start gap-1.5 text-callout text-danger"><Icon as={CirclePause} size={14} className="mt-px" /> {t.reason}</div>}
+      {t.queued && <div className="mt-1 flex gap-1.5 text-callout text-fg-secondary"><Icon as={Clock} size={14} className="mt-px" />Queued: {t.queued}</div>}
+      {t.waiting && <div className="mt-2 flex items-start gap-1.5 text-callout text-status-warn"><Icon as={CirclePause} size={14} className="mt-px" /> {t.waiting.text}</div>}
+      {t.done && <div className="mt-2 flex gap-1.5 text-callout text-status-done"><Icon as={CircleCheck} size={14} className="mt-px" /> {t.done}</div>}
+      {t.badge && <div className="mt-2 flex items-start gap-1.5 text-callout text-status-warn"><span className="mt-px"><GlyphIcon glyph={t.badge.icon} /></span> {t.badge.text}{t.badge.retry && `. Retrying in ${Math.max(0, Math.ceil((t.badge.retry.run_after - now) / 1000))} s (${t.badge.retry.attempts}/${t.badge.retry.max_attempts})`}</div>}
+      {t.flag && <div className="mt-3 -mx-3 -mb-3 px-3 py-2 border-t border-separator rounded-b-lg flex items-center gap-1.5 text-callout font-medium text-accent"><Icon as={Flag} size={14} /> {t.flag}</div>}
+      {moves.length > 0 && <button className="btn btn-ghost btn-sm absolute top-2 right-2 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 [@media(pointer:coarse)]:opacity-100 bg-elevated" aria-haspopup="menu" onClick={(e) => { e.stopPropagation(); setMenu((m) => !m); }}>Move… <kbd aria-hidden className="kbd">m</kbd></button>}
+      {menu && <ul role="menu" className="mt-2 rounded-lg bg-sunken p-1" onClick={(e) => e.stopPropagation()}>
+        {moves.map(([l, f]) => <li key={l} role="none"><button role="menuitem" className="w-full text-left h-7 px-2 rounded-md text-body hover:bg-fill-strong" onClick={() => { setMenu(false); f(); }}>{l}</button></li>)}
       </ul>}
       <div onClick={(e) => e.stopPropagation()}>{dlg}</div>
     </li>
@@ -108,27 +117,28 @@ export function Board({ now }: { now: number }) {
   const cols = showCancelled ? [...COLUMNS, ['cancelled', 'Cancelled'] as [string, string]] : COLUMNS;
   return (
     <section aria-labelledby="board-h" className="h-full flex flex-col">
-      <div className="flex items-center gap-3 p-3 border-b border-slate-700">
-        <h2 id="board-h" className="font-semibold">Board</h2>
-        <button className="btn bg-sky-700 hover:bg-sky-600" onClick={() => open({ kind: 'newtask' })}>+ New task</button>
-        <label className="text-xs flex items-center gap-1 ml-auto"><input type="checkbox" checked={showCancelled} onChange={(e) => setShowCancelled(e.target.checked)} /> Show cancelled</label>
+      <div className="flex items-center gap-3 px-5 pt-4 pb-1">
+        <h2 id="board-h" className="text-title">Board</h2>
+        <button className="btn btn-primary btn-sm" onClick={() => open({ kind: 'newtask' })}><Icon as={Plus} size={14} />New task</button>
+        <label className="text-callout text-fg-secondary inline-flex items-center gap-2 ml-auto"><input type="checkbox" className="checkbox" checked={showCancelled} onChange={(e) => setShowCancelled(e.target.checked)} /> Show cancelled</label>
       </div>
-      <div className="flex-1 overflow-x-auto flex gap-3 p-3">
+      <div className="flex-1 min-h-0 overflow-x-auto flex gap-4 px-5 py-4 max-md:px-4 max-md:snap-x max-md:snap-mandatory">
         {cols.map(([k, l]) => {
           let ts = boot.tasks.filter((t: any) => t.status === k);
           const total = ts.length;
           if (k === 'done' && !allDone) ts = ts.slice(-20);
           return (
-            <div key={k} data-board-col={k} className={`min-w-[11rem] flex-1 flex flex-col rounded ${over === k ? 'outline outline-2 outline-sky-500' : ''}`}
+            <div key={k} data-board-col={k} className={`w-[272px] max-md:w-[85vw] max-md:snap-start shrink-0 flex flex-col gap-2 min-h-0 rounded-xl ${over === k ? 'bg-accent/[.06] ring-2 ring-accent/40' : ''}`}
               onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; }} onDragEnter={() => setOver(k)}
               onDragLeave={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setOver((o) => (o === k ? null : o)); }}
               onDrop={(e) => { e.preventDefault(); setOver(null); const id = parseDragId(e.dataTransfer); if (id) dropHandlers.get(id)?.(k); }}>
-              <h3 className="text-xs uppercase tracking-wide text-slate-400 mb-2">{l} ({total})</h3>
-              <ul aria-label={`${l}, ${total} task${total === 1 ? '' : 's'}`} className="space-y-2 overflow-y-auto" data-nav-list="column">
-                {ts.length === 0 && <li className="text-xs text-slate-500">No tasks.</li>}
+              <h3 className="h-8 shrink-0 flex items-center gap-1.5 px-1 text-callout font-semibold text-fg-secondary">
+                <Icon as={STATUS_ICON(k)} size={14} className={STATUS_ICON_CLS(k)} />{l} <span className="font-normal text-fg-tertiary tabular-nums">({total})</span></h3>
+              <ul aria-label={`${l}, ${total} task${total === 1 ? '' : 's'}`} className="flex flex-col gap-2 overflow-y-auto overscroll-contain px-1 -mx-1 pb-2 min-h-0" data-nav-list="column">
+                {ts.length === 0 && <li className="rounded-lg border border-dashed border-separator-strong px-3 py-6 text-center text-callout text-fg-tertiary">No tasks.</li>}
                 {ts.map((t: any) => <TaskCard key={t.id} t={t} now={now} />)}
               </ul>
-              {k === 'done' && total > 20 && !allDone && <button className="text-xs underline mt-2" onClick={() => setAllDone(true)}>Show all</button>}
+              {k === 'done' && total > 20 && !allDone && <button className="btn btn-link text-callout self-start" onClick={() => setAllDone(true)}>Show all</button>}
             </div>
           );
         })}
@@ -161,36 +171,46 @@ export function Settings() {
   const changes = fields.filter(([k]) => parsed[k] !== (cur as any)[k]);
   const dr = boot.system.doctor_report;
   return (
-    <section aria-labelledby="set-h" className="h-full overflow-y-auto p-4 max-w-2xl">
-      <h2 id="set-h" className="text-lg font-semibold mb-4">Settings</h2>
-      <h3 className="font-semibold mb-2">Budgets &amp; caps</h3>
-      <div className="space-y-2">
+    <section aria-labelledby="set-h" className="h-full overflow-y-auto overscroll-contain bg-window">
+      <div className="mx-auto max-w-[680px] px-6 py-8 max-sm:px-4 flex flex-col gap-8">
+      <h2 id="set-h" className="text-title">Settings</h2>
+      <div>
+      <h3 className="text-headline px-1 mb-2">Budgets &amp; caps</h3>
+      <div className="group-list">
         {fields.map(([k, l, hint]) => (
-          <div key={k} className="flex items-center gap-3 text-sm">
-            <label htmlFor={`f-${k}`} className="w-48">{l}</label>
-            <input id={`f-${k}`} ref={(el) => { refs.current[k] = el; }} className="input w-24" inputMode="decimal" value={vals[k] ?? ''}
+          <div key={k} className="group-row max-sm:flex-col max-sm:items-stretch max-sm:gap-1.5">
+            <div className="flex-1 min-w-0"><label htmlFor={`f-${k}`} className="field-label">{l}</label>
+              {invalid.some(([x]) => x === k) && <span role="alert" className="field-error">{k === 'max_concurrency' ? 'Must be 1–4' : 'Must be > 0'}</span>}</div>
+            <input id={`f-${k}`} ref={(el) => { refs.current[k] = el; }} className="input input-num order-3" inputMode="decimal" value={vals[k] ?? ''}
               aria-invalid={invalid.some(([x]) => x === k)} onChange={(e) => setVals({ ...vals, [k]: e.target.value })} />
-            <span className="text-slate-400">{hint}</span>
-            {invalid.some(([x]) => x === k) && <span role="alert" className="text-rose-300 text-xs">{k === 'max_concurrency' ? 'Must be 1–4' : 'Must be > 0'}</span>}
+            <span className="order-2 w-36 max-sm:w-auto text-right max-sm:text-left text-callout text-fg-tertiary tabular-nums">{hint}</span>
           </div>))}
       </div>
-      <button className="btn bg-sky-700 hover:bg-sky-600 mt-3" disabled={invalid.length > 0 || changes.length === 0} onClick={() => setConfirm(true)}>Save</button>
+      <div className="mt-3 flex justify-end gap-2"><button className="btn btn-primary" disabled={invalid.length > 0 || changes.length === 0} onClick={() => setConfirm(true)}>Save</button></div>
+      </div>
       {confirm && <Dialog title="Save changes?" onClose={() => setConfirm(false)}>
-        <ul className="text-sm mb-3 space-y-1">{changes.map(([k, l]) => <li key={k}>{l}: {k === 'day_usd' ? usd((cur as any)[k]) : (cur as any)[k]} → {k === 'day_usd' ? usd(parsed[k]) + ' est.' : parsed[k]}</li>)}</ul>
-        <div className="flex justify-end gap-2"><button className="btn bg-slate-700" onClick={() => setConfirm(false)}>Cancel</button>
+        <ul className="mt-3 divide-y divide-separator text-body">{changes.map(([k, l]) => <li key={k} className="py-1.5">{l}: <span className="text-fg-tertiary line-through">{k === 'day_usd' ? usd((cur as any)[k]) : (cur as any)[k]}</span> → <span className="font-medium">{k === 'day_usd' ? usd(parsed[k]) + ' est.' : parsed[k]}</span></li>)}</ul>
+        <DialogFooter><button className="btn btn-secondary" onClick={() => setConfirm(false)}>Cancel</button>
           <ActionButton label="Save" kind="primary" pending="Saving…" run={async () => {
-            await api('/api/budgets', { method: 'PUT', body: Object.fromEntries(changes.map(([k]) => [k, parsed[k]])) }); await refresh(); setConfirm(false); toast('Settings saved'); }} /></div>
+            await api('/api/budgets', { method: 'PUT', body: Object.fromEntries(changes.map(([k]) => [k, parsed[k]])) }); await refresh(); setConfirm(false); toast('Settings saved'); }} /></DialogFooter>
       </Dialog>}
       <AgentsSettings />
-      <h3 className="font-semibold mt-6 mb-2">Doctor</h3>
-      <div className="text-sm flex items-center gap-3 flex-wrap">
-        {dr ? <span>Last run <Time t={dr.at} now={boot.now} /> · {dr.ok ? <span className="text-emerald-300"><span aria-hidden>✓</span> all required checks passed</span> : <span className="text-rose-300"><span aria-hidden>✕</span> failed</span>}</span> : <span>Not run yet</span>}
-        {boot.system.claude_version && <span className="text-slate-400">claude {boot.system.claude_version}</span>}
-        <ActionButton label="Re-run" pending="Running…" run={async () => { await api('/api/doctor', { body: {} }); toast('Checks started; results appear here'); }} />
-        {dr && <button className="btn bg-slate-700" onClick={() => setReport((r) => !r)}>{report ? 'Hide report' : 'Show report'}</button>}
+      <div>
+      <h3 className="text-headline px-1 mb-2">Doctor</h3>
+      <div className="group-list">
+        <div className="group-row flex-wrap">
+          <div className="flex-1 min-w-0 text-body flex items-center gap-2 flex-wrap">
+            {dr ? <span className="inline-flex items-center gap-1.5 flex-wrap">{dr.ok ? <span className="inline-flex items-center gap-1.5 text-status-done"><Icon as={CircleCheck} /> all required checks passed</span> : <span className="inline-flex items-center gap-1.5 text-danger"><Icon as={CircleX} /> failed</span>}
+              <span className="text-caption text-fg-tertiary">Last run <Time t={dr.at} now={boot.now} />{boot.system.claude_version ? ` · claude ${boot.system.claude_version}` : ''}</span></span> : <span>Not run yet</span>}
+          </div>
+          <ActionButton small label="Re-run" pending="Running…" run={async () => { await api('/api/doctor', { body: {} }); toast('Checks started; results appear here'); }} />
+          {dr && <button className="btn btn-ghost btn-sm" onClick={() => setReport((r) => !r)}>{report ? 'Hide report' : 'Show report'}</button>}
+        </div>
+        {report && dr && <div className="px-4 py-3"><ul className="font-mono text-mono bg-sunken rounded-md p-3 space-y-0.5">{dr.checks.map((c: any) => (
+          <li key={c.id} className="flex items-start gap-2"><span className="mt-0.5"><Icon as={c.ok ? CircleCheck : c.level === 'fail' ? CircleX : TriangleAlert} size={14} className={c.ok ? 'text-status-done' : c.level === 'fail' ? 'text-danger' : 'text-status-warn'} /></span><span>{c.id}: {c.ok ? 'ok' : c.level} — {c.detail}</span></li>))}</ul></div>}
       </div>
-      {report && dr && <ul className="mt-2 text-sm space-y-1">{dr.checks.map((c: any) => (
-        <li key={c.id}><span aria-hidden>{c.ok ? '✓' : c.level === 'fail' ? '✕' : '⚠'}</span> {c.id}: {c.ok ? 'ok' : c.level} — {c.detail}</li>))}</ul>}
+      </div>
+      </div>
     </section>
   );
 }
