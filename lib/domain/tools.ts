@@ -2,12 +2,13 @@ import type { DB } from '../db';
 import { tx } from '../db';
 import { now, sha256, canonicalJSON, DomainError } from '../util';
 import { emit } from './events';
-import { enqueueJob, PRIORITY, kindSettings, type JobRow } from './jobs';
+import { enqueueJob, PRIORITY, kindSettings, refreshPresence, type JobRow } from './jobs';
 import { insertMessage } from './messages';
 import { getThread, generalChannel } from './threads';
 import { getTask, lastHead } from './rounds';
 import { createTask, applySubmitForReview, approveReview, requestChanges, blockTask, cancelTask, editTask, addNote, unblockTask } from './tasks';
 import { workspaceFacts, workspaceChanged, captureRound, type Capture } from './git';
+import { activeWorkerIds, enabledWorkerIds, nameTaken, MAX_WORKERS, WORK_CAP_USD } from './agents';
 
 /** Identity always comes from the token (TECH §8), never tool input. */
 export interface Caller { jobId: number; agent: string; role: string; kind: JobRow['kind']; threadId: number; taskId: number | null }
@@ -16,11 +17,11 @@ export type ToolResult = { ok: true; [k: string]: unknown } | { ok: false; error
 export const TOOL_SCHEMAS: Record<string, { description: string; inputSchema: Record<string, unknown> }> = {
   post_message: { description: 'Post a message in a Slackboard thread (defaults to the job thread).', inputSchema: { type: 'object', additionalProperties: false, required: ['body'], properties: {
     body: { type: 'string', minLength: 1, maxLength: 4000 }, thread_id: { type: 'integer' },
-    mentions: { type: 'array', items: { enum: ['user', 'director', 'worker'] }, uniqueItems: true, maxItems: 3 },
-    wake: { type: 'boolean', default: false, description: 'Director only: wake the mentioned worker.' }, kind: { enum: ['chat', 'status'], default: 'chat' } } } },
+    mentions: { type: 'array', items: { type: 'string' }, uniqueItems: true, maxItems: 4 },
+    wake: { type: 'boolean', default: false, description: 'Director only: wake the task assignee (mention it).' }, kind: { enum: ['chat', 'status'], default: 'chat' } } } },
   create_task: { description: 'Create a task. Without parent_id it is a proposal that needs the user\'s approval.', inputSchema: { type: 'object', additionalProperties: false, required: ['title', 'description', 'acceptance'], properties: {
     title: { type: 'string', minLength: 1, maxLength: 200 }, description: { type: 'string', maxLength: 8000 },
-    acceptance: { type: 'string', minLength: 1, maxLength: 4000 }, assignee: { enum: ['worker'], default: 'worker' },
+    acceptance: { type: 'string', minLength: 1, maxLength: 4000 }, assignee: { type: 'string' },
     parent_id: { type: ['integer', 'null'], default: null }, why: { type: 'string', maxLength: 500 } } } },
   update_task: { description: 'Task actions: submit_for_review, approve, request_changes, block, cancel, edit.', inputSchema: { type: 'object', additionalProperties: false, required: ['task_id', 'action'], properties: {
     task_id: { type: 'integer' }, action: { enum: ['submit_for_review', 'approve', 'request_changes', 'block', 'cancel', 'edit'] },
@@ -31,6 +32,11 @@ export const TOOL_SCHEMAS: Record<string, { description: string; inputSchema: Re
   request_help: { description: 'Ask for help: worker -> director, director -> user.', inputSchema: { type: 'object', additionalProperties: false, required: ['question'], properties: {
     question: { type: 'string', minLength: 1, maxLength: 2000 }, task_id: { type: 'integer' },
     options: { type: 'array', items: { type: 'string', maxLength: 200 }, maxItems: 4 } } } },
+  spawn_worker: { description: 'Ask the user to add a named worker (needs approval; uses allowance). Only when independent tasks are waiting and every worker is busy or unsuited.', inputSchema: { type: 'object', additionalProperties: false, required: ['name', 'skill_note', 'why'], properties: {
+    name: { type: 'string', pattern: '^[a-z][a-z0-9_]{1,23}$' }, skill_note: { type: 'string', minLength: 1, maxLength: 500, description: 'What this worker is for; shown to the user and in every prompt.' },
+    why: { type: 'string', minLength: 1, maxLength: 500 },
+    daily_usd: { type: 'number', minimum: 1.0, maximum: 3.0, default: 2.0, description: '>= worker work cap 1.00' },
+    daily_jobs: { type: 'integer', minimum: 1, maximum: 20, default: 10 } } } },
   request_approval: { description: 'Ask the user to approve an action Slackboard cannot perform (send, spend, post_external, budget_increase).', inputSchema: { type: 'object', additionalProperties: false, required: ['kind', 'summary', 'payload'], properties: {
     kind: { enum: ['send', 'spend', 'post_external', 'budget_increase'] }, summary: { type: 'string', minLength: 1, maxLength: 500 },
     payload: { type: 'object' }, task_id: { type: 'integer' } } } },
@@ -52,6 +58,8 @@ export function validate(tool: string, input: any): string | null {
       : t === 'object' ? (typeof v === 'object' && v !== null && !Array.isArray(v)) : typeof v === t;
     if (types && !types.some(ok)) return `${k} has the wrong type`;
     if (p.enum && !p.enum.includes(v)) return `${k} must be one of ${p.enum.join(', ')}`;
+    if (typeof v === 'string' && p.pattern && !new RegExp(p.pattern).test(v)) return `${k} has the wrong format`;
+    if (typeof v === 'number' && ((p.minimum !== undefined && v < p.minimum) || (p.maximum !== undefined && v > p.maximum))) return `${k} out of range`;
     if (typeof v === 'string' && ((p.minLength && v.length < p.minLength) || (p.maxLength && v.length > p.maxLength))) return `${k} length out of range`;
     if (Array.isArray(v)) { if (p.maxItems && v.length > p.maxItems) return `${k} has too many items`;
       if (p.items?.enum && v.some((x) => !p.items.enum.includes(x))) return `${k} items must be one of ${p.items.enum.join(', ')}`; }
@@ -63,9 +71,26 @@ export function allowedTools(c: Pick<Caller, 'role' | 'kind'>): string[] {
   return kindSettings(c.role, c.kind).tools;
 }
 
+/** Schemas published to the model: generated enums (create_task.assignee, post_message mentions) built per job from the live agent set (PHASE2 §T6). */
+export function publishedTools(db: DB, c: Pick<Caller, 'role' | 'kind'>): { name: string; description: string; inputSchema: any }[] {
+  const enabled = enabledWorkerIds(db), active = activeWorkerIds(db);
+  return allowedTools(c).map((name) => {
+    const s = JSON.parse(JSON.stringify(TOOL_SCHEMAS[name]));
+    const props = s.inputSchema.properties;
+    if (name === 'create_task') {
+      if (enabled.length) props.assignee = { enum: enabled, description: 'Defaults to the enabled worker with the fewest open tasks.' };
+      else delete props.assignee;                                                  // never an empty enum
+    }
+    if (name === 'post_message') props.mentions.items = { enum: ['user', 'director', ...active] };
+    return { name, ...s };
+  });
+}
+
 /** Idempotency wrapper + dispatch (TECH §5.10). Git for submit_for_review / approve happens before the txn. */
 export function callTool(db: DB, c: Caller, tool: string, input: any): ToolResult {
   if (!allowedTools(c).includes(tool)) return record(db, c, tool, input, rej('not_allowed_for_role', `${c.agent} ${c.kind} jobs cannot call ${tool}`));
+  if (tool === 'spawn_worker' && input && typeof input.daily_usd === 'number' && input.daily_usd < WORK_CAP_USD)
+    return record(db, c, tool, input, rej('allowance_below_job_cap', 'one work run reserves $1.00'));
   const verr = validate(tool, input);
   if (verr) return record(db, c, tool, input, rej('validation_error', verr));
   const hash = sha256(canonicalJSON(input));
@@ -114,23 +139,34 @@ function dispatch(db: DB, c: Caller, tool: string, input: any, pre: { cap?: Capt
       if (threadId !== c.threadId && !(c.role === 'director' && c.kind === 'respond' && !isTaskThread && th.channel_id === generalChannel(db)))
         return rej('wrong_thread', 'post only in your job thread');
       const mentions: string[] = input.mentions ?? [];
+      const valid = ['user', 'director', ...activeWorkerIds(db)];
+      const unknown = mentions.find((m) => !valid.includes(m));
+      if (unknown) return rej('unknown_agent', `${unknown} is not a valid mention; use ${valid.join(', ')}`);
       if (mentions.includes('user')) {
         const task = db.prepare(`SELECT status FROM tasks WHERE thread_id=?`).get(threadId) as { status: string } | undefined;
         if (c.role !== 'director' || (task && task.status !== 'done')) return rej('cannot_address_user', 'use request_help');
       }
-      if (input.wake && (c.role !== 'director' || !mentions.includes('worker'))) return rej('validation_error', 'wake is director-only and needs mentions:["worker"]');
+      const wakeTask = input.wake ? db.prepare(`SELECT * FROM tasks WHERE thread_id=?`).get(threadId) as any : undefined;
+      if (input.wake) {
+        if (c.role !== 'director') return rej('validation_error', 'wake is director-only');
+        if (!mentions.some((m) => m !== 'user' && m !== 'director')) return rej('validation_error', 'wake needs mentions:[<the task assignee>]');
+        if (wakeTask && !mentions.includes(wakeTask.assignee_agent_id)) return rej('wrong_agent', `wake only the task assignee (${wakeTask.assignee_agent_id})`);
+      }
       const id = insertMessage(db, { thread: threadId, authorKind: 'agent', agent: c.agent, kind: input.kind ?? 'chat', body: input.body, mentions, wakes: !!input.wake, jobId: c.jobId });
       if (input.wake) {
-        const task = db.prepare(`SELECT * FROM tasks WHERE thread_id=?`).get(threadId) as any;
+        const task = wakeTask;
         if (task && task.status === 'blocked' && task.blocked_reason === 'help') unblockTask(db, task, c.agent, 'reply', { clean: true, head: null });
-        else if (task && !['done', 'cancelled'].includes(task.status) && task.assignee_agent_id === 'worker')
-          enqueueJob(db, { agent: 'worker', kind: 'respond', thread: threadId, task: task.id, trigger: id, priority: PRIORITY.directorWake, actor: c.agent });
+        else if (task && !['done', 'cancelled'].includes(task.status) && task.assignee_agent_id)
+          enqueueJob(db, { agent: task.assignee_agent_id, kind: 'respond', thread: threadId, task: task.id, trigger: id, priority: PRIORITY.directorWake, actor: c.agent });
       }
       return { ok: true, message_id: id };
     }
     case 'create_task': {
       const n = (db.prepare(`SELECT count(*) AS n FROM tool_calls WHERE job_id=? AND tool='create_task' AND outcome='ok'`).get(c.jobId) as any).n;
       if (n >= 3) return rej('validation_error', 'at most 3 create_task calls per job');
+      const enabled = enabledWorkerIds(db);
+      if (!enabled.length) return rej('no_enabled_worker', 'Enable a worker in Settings');
+      if (input.assignee !== undefined && !enabled.includes(input.assignee)) return rej('unknown_assignee', `assignee must be one of: ${enabled.join(', ')}`);
       const r = createTask(db, { title: input.title, description: input.description, acceptance: input.acceptance, assignee: input.assignee,
         parentId: input.parent_id ?? null, why: input.why, by: { kind: 'agent', agent: c.agent, jobId: c.jobId } });
       return { ok: true, ...r };
@@ -181,10 +217,37 @@ function dispatch(db: DB, c: Caller, tool: string, input: any, pre: { cap?: Capt
       const to = c.role === 'director' ? 'user' : 'director';
       const id = insertMessage(db, { thread: c.threadId, authorKind: 'agent', agent: c.agent, kind: 'help', body: input.question + opts, mentions: [to], jobId: c.jobId });
       emit(db, 'help.requested', c.agent, 'message', id, { routed_to: to, task_id: taskId ?? null, options: input.options ?? [] }, c.jobId);
+      const asked = taskId ? getTask(db, taskId) : undefined;
+      if (asked?.assignee_agent_id) refreshPresence(db, asked.assignee_agent_id);       // the asker's label depends on who got the question
       return { ok: true, message_id: id, routed_to: to };
+    }
+    case 'spawn_worker': {
+      if (c.role !== 'director' || c.kind !== 'respond') return rej('not_allowed_for_role', 'director respond jobs only');
+      const usd = input.daily_usd ?? 2.0, jobs = input.daily_jobs ?? 10;
+      if (usd < WORK_CAP_USD) return rej('allowance_below_job_cap', 'one work run reserves $1.00');
+      if ((db.prepare(`SELECT count(*) AS n FROM tool_calls WHERE job_id=? AND tool='spawn_worker' AND outcome='ok'`).get(c.jobId) as any).n >= 1)
+        return rej('validation_error', 'at most 1 spawn_worker call per job');
+      if (nameTaken(db, input.name)) return rej('name_taken', 'pick another name (reserved or already used, including retired agents)');
+      if (db.prepare(`SELECT 1 FROM approvals WHERE kind='spend' AND status='pending' AND json_extract(payload,'$.action')='spawn_worker'`).get())
+        return rej('spawn_pending', 'a spawn request is already waiting for the user');
+      if (activeWorkerIds(db).length >= MAX_WORKERS) return rej('worker_cap', 'assign to an existing worker or ask the user to retire one');
+      const t = now();
+      const payload = { action: 'spawn_worker', name: input.name, skill_note: input.skill_note, model: 'sonnet', daily_usd: usd, daily_jobs: jobs };
+      let aid: number;
+      try {
+        aid = Number(db.prepare(`INSERT INTO approvals(kind, requested_by_agent_id, job_id, thread_id, task_id, summary, payload, payload_hash, created_at, expires_at)
+                                 VALUES ('spend',?,?,?,NULL,?,?,?,?,?)`).run(c.agent, c.jobId, c.threadId, input.why, JSON.stringify(payload), sha256(canonicalJSON(payload)), t, t + 86_400_000).lastInsertRowid);
+      } catch (e: any) {
+        if (/UNIQUE constraint failed/.test(String(e.message))) return rej('spawn_pending', 'a spawn request is already waiting for the user');
+        throw e;
+      }
+      emit(db, 'approval.requested', c.agent, 'approval', aid, { kind: 'spend', action: 'spawn_worker', name: input.name }, c.jobId);
+      insertMessage(db, { thread: c.threadId, authorKind: 'agent', agent: c.agent, kind: 'approval', body: `Approval requested (add worker ${input.name}): ${input.why}`, jobId: c.jobId });
+      return { ok: true, approval_id: aid, status: 'pending' };
     }
     case 'request_approval': {
       if (c.role !== 'director') return rej('not_allowed_for_role', 'director only');
+      if (input.payload?.action === 'spawn_worker') return rej('validation_error', 'use spawn_worker');
       const t = now();
       const r = db.prepare(`INSERT INTO approvals(kind, requested_by_agent_id, job_id, thread_id, task_id, summary, payload, payload_hash, created_at, expires_at)
                             VALUES (?,?,?,?,?,?,?,?,?,?)`).run(input.kind, c.agent, c.jobId, c.threadId, input.task_id ?? null, input.summary,

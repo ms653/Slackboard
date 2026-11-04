@@ -25,5 +25,6 @@ export function backoffMs(attempt: number, rand = Math.random): number {
   return Math.round(base * scale);
 }
 export class DomainError extends Error {
+  extra?: Record<string, unknown>;
   constructor(public code: string, public hint = '', public status = 409) { super(code); }
 }

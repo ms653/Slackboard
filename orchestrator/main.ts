@@ -4,7 +4,7 @@ import { openDb, tx } from '@/lib/db';
 import { now, randomToken, uuid } from '@/lib/util';
 import { paths, ensureDir, dataDir } from '@/lib/paths';
 import { emit } from '@/lib/domain/events';
-import { claimNext, cancelDeadQueuedJobs, budgetBlocked } from '@/lib/domain/claim';
+import { claimNext, cancelDeadQueuedJobs, budgetBlocked, agentBudgetHits } from '@/lib/domain/claim';
 import { finishAttempt } from '@/lib/domain/finish';
 import { refreshAllPresence, type JobRow } from '@/lib/domain/jobs';
 import { expireApprovals, setStatus } from '@/lib/domain/tasks';
@@ -72,6 +72,7 @@ function tick(): void {
       log(`claimed job ${job.id} (${job.agent_id} ${job.kind}${job.task_id ? ' T-' + job.task_id : ''}, attempt ${job.attempts})`);
       spawnJob(ctx, job, token);
     }
+    tx(db, () => { agentBudgetHits(db); refreshAllPresence(db); });          // PHASE2 §T5.1: per-agent budget.hit (daily dedup) + presence labels
     const why = budgetBlocked(db);
     if (why && now() - lastBudgetHit > 600_000 && db.prepare(`SELECT 1 FROM jobs WHERE status='queued'`).get()) {
       lastBudgetHit = now(); emit(db, 'budget.hit', 'system', 'budget', null, { reason: why }); refreshAllPresence(db);

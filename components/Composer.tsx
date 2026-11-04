@@ -22,8 +22,8 @@ export function hintText(p: any, threadStatus: string | null, boot: any): string
   return lines;
 }
 
-export function Composer({ threadId, preview, threadStatus, onSent, label }: {
-  threadId: number | null; preview: any; threadStatus: string | null; onSent?: (r: any) => void; label: string }) {
+export function Composer({ threadId, preview, threadStatus, onSent, label, spawnQueued }: {
+  threadId: number | null; preview: any; threadStatus: string | null; onSent?: (r: any) => void; label: string; spawnQueued?: boolean }) {
   const { boot, refresh, composerPrefill, set } = useStore();
   const [text, setText] = useState('');
   const [busy, setBusy] = useState(false);
@@ -39,7 +39,7 @@ export function Composer({ threadId, preview, threadStatus, onSent, label }: {
     catch (e: any) { setErr(e.hint || e.code); }
     finally { setBusy(false); }
   };
-  const hints = hintText(preview, threadStatus, boot);
+  const hints = spawnQueued ? ['Director queued (after spawn approval)'] : hintText(preview, threadStatus, boot);
   return (
     <div className="border-t border-slate-700 p-3">
       <label htmlFor={`composer-${threadId ?? 'root'}`} className="sr-only">{label}</label>

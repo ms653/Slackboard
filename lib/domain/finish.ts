@@ -24,11 +24,13 @@ export function helpEnded(db: DB, job: JobRow): void {
   if (job.kind !== 'help' || !job.task_id) return;
   const t = getTask(db, job.task_id);
   if (!t || t.status !== 'blocked' || t.blocked_reason !== 'help') return;
+  const peer = db.prepare(`SELECT role FROM agents WHERE id=?`).get(job.agent_id) as { role: string } | undefined;
+  if (peer?.role === 'worker' && t.help_agent_id !== job.agent_id) return;     // PHASE2 §T3.2: T11c/T16 cancellations never fire it
   const other = db.prepare(`SELECT 1 FROM jobs WHERE task_id=? AND kind='help' AND status IN ('queued','running') AND id<>?`).get(t.id, job.id);
   if (other) return;
   db.prepare(`UPDATE tasks SET blocked_reason='job_failed', updated_by='system', updated_at=?, version=version+1 WHERE id=?`).run(now(), t.id);
   emit(db, 'task.updated', 'system', 'task', t.id, { blocked_reason: 'job_failed' });
-  systemMessage(db, t.thread_id, `director could not answer the help request (${job.failure_kind ?? job.status}). Retry, or reply here to unblock the worker yourself.`);
+  systemMessage(db, t.thread_id, `${job.agent_id} could not answer the help request (${job.failure_kind ?? job.status}). Retry, or reply here to unblock the worker yourself.`);
 }
 
 /** Requeue preserving id/attempts/session; merge a colliding queued sibling into it (TECH §3.2). */
@@ -121,7 +123,7 @@ export function finishAttempt(db: DB, jobId: number, o: Outcome, expectedOwner: 
     const fresh = db.prepare(`SELECT * FROM jobs WHERE id=?`).get(j.id) as JobRow;
     const live = (s: string[]) => task && s.includes(task.status);
     if (c.rule === 'J5+T11' && task) {
-      setStatus(db, task, 'blocked', 'system', { blocked_reason: 'help' });
+      setStatus(db, task, 'blocked', 'system', { blocked_reason: 'help', help_agent_id: 'director' });   // routed_to: peer help is a later increment
       enqueueJob(db, { agent: 'director', kind: 'help', thread: task.thread_id, task: task.id, priority: PRIORITY.help });
     } else if (c.status === 'killed') {
       if ((j.kind === 'work' || j.kind === 'review') && live(['in_progress', 'in_review'])) setStatus(db, task!, 'blocked', 'system', { blocked_reason: 'killed' });

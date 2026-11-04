@@ -16,7 +16,7 @@ export function QuickSwitcher({ onClose }: { onClose: () => void }) {
     const e: Entry[] = [{ id: 'new', group: 'Action', label: 'New task', run: () => { setView('board'); open({ kind: 'newtask' }); } },
       { id: 'ch-general', group: 'Channel', label: '#general', run: () => setView('chat') }];
     for (const t of boot.tasks) e.push({ id: `t-${t.id}`, group: 'Task', label: `T-${t.id} ${t.title}`, hint: t.status.replace('_', ' '), run: () => open({ kind: 'task', id: t.id }) });
-    for (const a of boot.agents) e.push({ id: `a-${a.id}`, group: 'Agent', label: `@${a.id}`, hint: a.display_name, run: () => { set({ composerPrefill: `@${a.id} ` }); setView('chat'); } });
+    for (const a of boot.agents.filter((x: any) => !x.retired_at)) e.push({ id: `a-${a.id}`, group: 'Agent', label: `@${a.id}`, hint: a.display_name, run: () => { set({ composerPrefill: `@${a.id} ` }); setView('chat'); } });
     return e;
   }, [boot, open, setView, set]);
   const shown = useMemo(() => {

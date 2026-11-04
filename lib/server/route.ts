@@ -7,7 +7,7 @@ export async function handle(fn: () => unknown | Promise<unknown>) {
     const r = await fn();
     return NextResponse.json({ ok: true, ...(r && typeof r === 'object' && !Array.isArray(r) ? r : { data: r }) });
   } catch (e: any) {
-    if (e instanceof DomainError) return NextResponse.json({ ok: false, error: e.code, hint: e.hint }, { status: e.status });
+    if (e instanceof DomainError) return NextResponse.json({ ok: false, error: e.code, hint: e.hint, ...(e.extra ?? {}) }, { status: e.status });
     const msg = String(e?.message ?? e);
     const code = msg.match(/^[a-z_]+$/)?.[0] ?? (/SQLITE_BUSY|locked/.test(msg) ? 'db_locked' : 'internal_error');
     console.error('[api]', msg);

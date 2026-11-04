@@ -81,7 +81,7 @@ export function spawnJob(ctx: SpawnCtx, j: JobRow, token: string): void {
   const reasonRow = db.prepare(`SELECT json_extract(payload,'$.reason') r FROM events WHERE type='job.requeued' AND entity_id=? ORDER BY id DESC LIMIT 1`).get(String(j.id)) as { r: string } | undefined;
   const prompt = renderPrompt(db, j, j.attempts > 1 ? reasonRow?.r ?? null : null);
   fs.writeFileSync(path.join(run, 'prompt.md'), prompt);
-  const sysPrompt = fs.readFileSync(path.join(repoRoot(), 'prompts', `${role === 'director' ? 'director' : 'worker'}.md`), 'utf8');
+  const sysPrompt = fs.readFileSync(path.join(repoRoot(), 'prompts', `${role === 'director' ? 'director' : 'worker'}.md`), 'utf8').replace(/\{\{agent_id\}\}/g, j.agent_id);
   const builtins = ks.builtins.map((b) => (b === 'Write' || b === 'Edit') ? `${b}(./**)` : b);
   const allowed = [...builtins, ...ks.tools.map((t) => ss.mcp_tool_prefix + t)];
   const args = buildArgs({ prompt, model: agent.model, maxTurns: ks.maxTurns, budget: j.budget_cap_usd, allowed, sep: ctx.sep(),

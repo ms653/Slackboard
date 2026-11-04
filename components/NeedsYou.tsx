@@ -24,6 +24,8 @@ export function NeedsYou() {
   const [filter, setFilter] = useState<string[] | null>(null);
   const [dlg, setDlg] = useState<React.ReactNode>(null);
   const [expanded, setExpanded] = useState(false);
+  const [raise, setRaise] = useState<Record<number, boolean>>({});
+  const [spawnErr, setSpawnErr] = useState<Record<number, string>>({});
   if (!boot) return null;
   const killed = boot.needsYou.filter((n: any) => n.item_type === 'killed');
   const others = boot.needsYou.filter((n: any) => n.item_type !== 'killed');
@@ -47,13 +49,61 @@ export function NeedsYou() {
     if (n.item_type === 'approval') {
       const a = n.approval;
       const isTask = a.kind === 'create_top_level_task';
-      body = isTask
+      const isSpawn = a.kind === 'spend' && a.payload?.action === 'spawn_worker';
+      const p = a.payload;
+      const activeWorkers = boot.agents.filter((x: any) => x.role === 'worker' && !x.retired_at).length;
+      const maxc: number = boot.system.max_concurrency;
+      const showRaise = isSpawn && activeWorkers + 1 > maxc - 1 && maxc < 4;
+      const raiseOn = showRaise && (raise[a.id] ?? true);
+      const capReached = isSpawn && activeWorkers >= 3;
+      body = isSpawn
+        ? <><div>New worker &ldquo;{p.name}&rdquo; · model {p.model}</div>
+            <div>Skill: &ldquo;{p.skill_note}&rdquo;</div>
+            <div className="text-slate-300">Why: {a.summary}</div>
+            <div className="text-slate-300">From: #general{n.origin?.user_message ? ` · you: "${n.origin.user_message}"` : ''}</div>
+            <div>Allowance: up to {usd(p.daily_usd)} est./day (≈ {Math.floor(p.daily_usd / 1.0)} work runs/day), {p.daily_jobs} runs/day</div>
+            <div className="text-slate-400 text-xs">Shares your daily caps: {usd(boot.usage.limit_usd_day)} est., {boot.usage.limit_jobs_day} runs/day, {boot.usage.limit_jobs_5h} per 5 h</div>
+            <div className="text-slate-400 text-xs">Workers: {activeWorkers} → {activeWorkers + 1} of 3 · Run slots: {maxc} ({Math.max(1, maxc - 1)} for workers, {maxc > 1 ? 1 : 0} kept for director)</div>
+            {showRaise && <label className="flex items-center gap-2"><input type="checkbox" checked={raiseOn} onChange={(e) => setRaise({ ...raise, [a.id]: e.target.checked })} />
+              Also raise max concurrent agents {maxc} → {maxc + 1} ({activeWorkers + 1} workers can run at once)</label>}
+            {capReached && <div role="alert" className="text-amber-200">Worker limit reached (3/3). Retire a worker first.</div>}
+            {spawnErr[a.id] && <div role="alert" className="text-rose-300">{spawnErr[a.id]}</div>}</>
+        : isTask
         ? <><div>T-{a.task_id} &ldquo;{a.payload.title}&rdquo; → assign: {a.payload.assignee}</div>
             <div className="text-slate-300">Why: {a.summary}</div>
             <details className="text-slate-300"><summary className="cursor-pointer">Acceptance</summary><pre className="whitespace-pre-wrap text-xs">{a.payload.acceptance}</pre></details>
             <div className="text-slate-400 text-xs">Est. cap: $1.00, 15 turns per run</div></>
         : <><div>{a.kind.replace('_', ' ')}: {a.summary}</div><pre className="text-xs bg-slate-900 p-2 rounded whitespace-pre-wrap">{JSON.stringify(a.payload, null, 2)}</pre></>;
+      const spawnApprove = () => setDlg(<Dialog title={`Add worker ${p.name}?`} onClose={() => setDlg(null)}>
+        <p className="text-sm mb-2">This uses allowance. Approving adds the worker now.</p>
+        <pre className="text-xs bg-slate-900 p-2 rounded whitespace-pre-wrap mb-2">{JSON.stringify(p, null, 2)}</pre>
+        {raiseOn && <p className="text-sm mb-2">Max concurrent agents {maxc} → {maxc + 1}</p>}
+        <div className="flex gap-2 justify-end"><button className="btn bg-slate-700" onClick={() => setDlg(null)}>Cancel</button>
+          <ActionButton label="Add worker" kind="primary" pending="Adding…" onError={(e) => {
+              setDlg(null);
+              if (e.code === 'worker_cap') setSpawnErr((m) => ({ ...m, [a.id]: 'Worker limit reached (3/3). Retire a worker first.' }));
+              else if (e.code === 'name_taken') setSpawnErr((m) => ({ ...m, [a.id]: 'Name already used. Reject and ask the director for another name.' }));
+              else if (e.code === 'invalid_payload') setSpawnErr((m) => ({ ...m, [a.id]: `This request is invalid (${e.hint}). Reject it.` }));
+              else return conflict(e) ?? false;
+              return true; }}
+            run={async () => {
+              const r: any = await api(`/api/approvals/${a.id}/decide`, { body: { decision: 'approved', ...(raiseOn ? { raise_concurrency_to: maxc + 1 } : {}) } });
+              await refresh(); setDlg(null); spawnToast(r, p); }} /></div></Dialog>);
+      const spawnToast = (r: any, pl: any) => {
+        const nm = pl.name;
+        if (boot.system.kill_switch) { toast(`Approved. ${nm} will start when agents resume.`); if (r.resumed) return; }
+        else if (r.resumed) { toast(`${nm} added. Director woken to assign work.`); return; }
+        const th = boot.threads.find((x: any) => x.id === a.thread_id);
+        const why = r.reason === 'thread_capped' ? 'capped' : 'closed';
+        const actions: NonNullable<Parameters<typeof toast>[2]> = [];
+        if (r.reason === 'thread_capped' && th && th.cap_raises === 0)
+          actions.push({ label: 'Raise cap', run: async () => { await api(`/api/threads/${a.thread_id}`, { body: { action: 'raise_cap' } }); await refresh(); toast('Cap raised. Reply in the thread to wake the director.'); } });
+        if (r.reason === 'thread_closed')
+          actions.push({ label: 'Reopen thread', run: async () => { await api(`/api/threads/${a.thread_id}`, { body: { action: 'reopen' } }); await refresh(); toast('Thread reopened. Reply in the thread to wake the director.'); } });
+        toast(`${nm} added. Director not woken: thread ${why}. Raise the cap or reopen, then reply in the thread to wake it.`, 'info', actions);
+      };
       const approve = async () => {
+        if (isSpawn) { spawnApprove(); return; }
         if (a.kind === 'budget_increase') { await api(`/api/approvals/${a.id}/decide`, { body: { decision: 'approved' } });
           set({ settingsPrefill: a.payload, settingsFocus: 'day_usd' }); setView('settings'); await refresh(); return; }
         if (!isTask) { setDlg(<Dialog title={`Approve ${a.kind.replace('_', ' ')}?`} onClose={() => setDlg(null)}>
@@ -67,9 +117,9 @@ export function NeedsYou() {
           blocked ? `Approved. T-${a.task_id} will start when agents resume.` : `Approved T-${a.task_id}`);
       };
       actions = <>
-        <ActionButton label="Approve" pending="Approving…" kind="primary" shortcut="a" run={approve} onError={conflict} />
+        <ActionButton label="Approve" pending="Approving…" kind="primary" shortcut="a" run={approve} onError={conflict} disabled={capReached} title={capReached ? 'Worker limit reached (3/3). Retire a worker first.' : undefined} />
         <ActionButton label="Reject" shortcut="r" run={async () => setDlg(<NoteDialog title="Reject" label="Note (optional)" required={false} confirm="Reject"
-          onClose={() => setDlg(null)} onDone={(note) => act(() => api(`/api/approvals/${a.id}/decide`, { body: { decision: 'rejected', note } }), 'Rejected')} />)} />
+          onClose={() => setDlg(null)} onDone={(note) => act(() => api(`/api/approvals/${a.id}/decide`, { body: { decision: 'rejected', note } }), isSpawn ? `Add worker ${p.name} rejected` : 'Rejected')} />)} />
         <button className="btn bg-slate-700" onClick={() => open({ kind: 'thread', id: a.thread_id })}>Open thread</button></>;
     } else if (n.item_type === 'help') {
       body = <><div className="whitespace-pre-wrap">{n.message.body}</div>{task && <div className="text-slate-400 text-xs">T-{task.id} {task.title}</div>}</>;
@@ -112,7 +162,7 @@ export function NeedsYou() {
     return (
       <li key={n.key} tabIndex={0} className="border-b border-slate-700 p-4 focus:outline focus:outline-2 focus:outline-sky-400">
         <div className="flex justify-between text-xs text-slate-400 mb-1">
-          <span className="font-semibold text-slate-200"><span aria-hidden>{icon}</span> {label}{n.approval && n.approval.kind === 'create_top_level_task' ? ' · New task' : ''}</span>
+          <span className="font-semibold text-slate-200"><span aria-hidden>{icon}</span> {label}{n.approval && n.approval.kind === 'create_top_level_task' ? ' · New task' : ''}{n.approval?.payload?.action === 'spawn_worker' ? ' · Add worker (uses allowance)' : ''}</span>
           <span>{n.approval ? `from ${n.approval.requested_by_agent_id} · ` : ''}{ago(n.created_at, boot.now)}</span>
         </div>
         <div className="text-sm space-y-1 mb-2">{body}</div>
@@ -157,7 +207,7 @@ export function NeedsYou() {
         <section aria-labelledby="exp-h" className="p-3 opacity-70">
           <h3 id="exp-h" className="text-xs uppercase text-slate-400 mb-1">Recently expired</h3>
           <ul>{boot.recentlyExpired.map((a: any) => (
-            <li key={a.id} className="text-sm py-1 flex gap-2 items-center">Expired after 24 h: {a.task_title ? `T-${a.task_id} "${a.task_title}"` : a.summary}
+            <li key={a.id} className="text-sm py-1 flex gap-2 items-center">Expired after 24 h: {a.task_title ? `T-${a.task_id} "${a.task_title}"` : a.kind === 'spend' && a.payload?.includes('"spawn_worker"') ? `Add worker ${JSON.parse(a.payload).name}` : a.summary}
               <button className="underline" onClick={() => { set({ composerPrefill: a.kind === 'create_top_level_task' ? `@director Please re-propose T-${a.task_id} "${a.task_title}"` : `@director Please ask again: ${a.summary}` }); setView('chat'); }}>
                 {a.kind === 'create_top_level_task' ? 'Re-propose' : 'Ask the director again'}</button></li>))}</ul>
         </section>)}

@@ -5,6 +5,7 @@ import { api } from './api';
 import { Composer } from './Composer';
 import { ActionButton, Dialog, NoteDialog, Presence, TaskStatus, Time, usd } from './ui';
 import { retryToast } from './NeedsYou';
+import { AgentsSettings } from './AgentsSettings';
 import { dropMove, parseDragId, TASK_MIME } from './dnd';
 
 /** Card drop handlers by task id; each TaskCard registers itself so the board can route a drop to the card's own dialogs. */
@@ -84,6 +85,7 @@ export function TaskCard({ t, now }: { t: any; now: number }) {
       <div className="text-xs text-slate-300">@{t.assignee_agent_id}{claimant && <> · <Presence a={claimant} now={now} /></>}</div>
       <div className="text-xs text-slate-400">{t.replies} msgs · {t.files} file{t.files === 1 ? '' : 's'} · {usd(t.cost)} est.</div>
       {t.reason && <div className="text-xs text-rose-200"><span aria-hidden>⏸</span> {t.reason}</div>}
+      {t.queued && <div className="text-xs text-amber-200">Queued: {t.queued}</div>}
       {t.waiting && <div className="text-xs text-amber-200"><span aria-hidden>⏸</span> {t.waiting.text}</div>}
       {t.done && <div className="text-xs text-emerald-200"><span aria-hidden>✓</span> {t.done}</div>}
       {t.badge && <div className="text-xs text-amber-200"><span aria-hidden>{t.badge.icon}</span> {t.badge.text}{t.badge.retry && `. Retrying in ${Math.max(0, Math.ceil((t.badge.retry.run_after - now) / 1000))} s (${t.badge.retry.attempts}/${t.badge.retry.max_attempts})`}</div>}
@@ -179,14 +181,7 @@ export function Settings() {
           <ActionButton label="Save" kind="primary" pending="Saving…" run={async () => {
             await api('/api/budgets', { method: 'PUT', body: Object.fromEntries(changes.map(([k]) => [k, parsed[k]])) }); await refresh(); setConfirm(false); toast('Settings saved'); }} /></div>
       </Dialog>}
-      <h3 className="font-semibold mt-6 mb-2">Agents</h3>
-      <ul className="space-y-2 text-sm">{boot.agents.map((a: any) => (
-        <li key={a.id} className="flex items-center gap-3">
-          <span className="w-24">{a.display_name}</span><span className="text-slate-400 w-40">model: {a.model} (read-only)</span>
-          <label className="flex items-center gap-1"><input type="checkbox" checked={!!a.enabled} onChange={async (e) => {
-            try { await api(`/api/agents/${a.id}`, { method: 'PUT', body: { enabled: e.target.checked } }); await refresh(); if (!e.target.checked) toast('Queued jobs wait until re-enabled'); }
-            catch (err: any) { toast(`Couldn't update: ${err.hint || err.code}`, 'error'); } }} /> Enabled</label>
-        </li>))}</ul>
+      <AgentsSettings />
       <h3 className="font-semibold mt-6 mb-2">Doctor</h3>
       <div className="text-sm flex items-center gap-3 flex-wrap">
         {dr ? <span>Last run <Time t={dr.at} now={boot.now} /> · {dr.ok ? <span className="text-emerald-300"><span aria-hidden>✓</span> all required checks passed</span> : <span className="text-rose-300"><span aria-hidden>✕</span> failed</span>}</span> : <span>Not run yet</span>}

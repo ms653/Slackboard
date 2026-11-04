@@ -1,7 +1,8 @@
 import fs from 'node:fs';
 import { db as getDb } from '../db';
 import { now, localMidnight, DomainError } from '../util';
-import { budgetNumbers } from '../domain/claim';
+import { budgetNumbers, queueReason, agentNumbers } from '../domain/claim';
+import { helpEscalatedToUser } from '../domain/tasks';
 import { globalBlock } from '../domain/wake';
 import { helpFailed, type TaskRow } from '../domain/rounds';
 import { isOurs, ORCH_STALE_MS } from '../proc';
@@ -20,11 +21,11 @@ export type Badge = { icon: string; text: string; retry?: { run_after: number; a
 const FAIL_TEXT: Record<string, string> = { timeout_idle: 'no output for 3 min', timeout_wall: 'time limit', orphaned: 'orchestrator restarted', error_during_execution: 'error' };
 
 /** Card lines derived once, server-side (UX §5). */
-function decorate(t: TaskRow, ny: Set<string>, extra: { threadStatus: string; capRaises: number; replies: number; cost: number; files: number; drift: boolean; hfailed: boolean; escalated: boolean; redo: boolean; workerNote?: string | null; badge: Badge | null }) {
+function decorate(t: TaskRow, ny: Set<string>, extra: { threadStatus: string; capRaises: number; replies: number; cost: number; files: number; drift: boolean; hfailed: boolean; escalated: boolean; helperReason?: string | null; failedHelper?: string | null; queued?: string | null; redo: boolean; workerNote?: string | null; badge: Badge | null }) {
   let reason: string | null = null;
   if (t.status === 'blocked') {
-    reason = ({ help: extra.escalated ? 'Blocked: waiting on you (help)' : 'Blocked: waiting on director (help)', review_cap: 'Blocked: you need to decide (review limit)',
-      job_failed: extra.hfailed ? 'Blocked: director could not answer (help failed)' : extra.drift ? 'Blocked: workspace changed after review' : 'Blocked: failed 3 times',
+    reason = ({ help: extra.escalated ? 'Blocked: waiting on you (help)' : `Blocked: waiting on ${(t as any).help_agent_id ?? 'director'} (help)${extra.helperReason ? ` · ${(t as any).help_agent_id} ${extra.helperReason}` : ''}`, review_cap: 'Blocked: you need to decide (review limit)',
+      job_failed: extra.hfailed ? `Blocked: ${extra.failedHelper ?? 'director'} could not answer (help failed)` : extra.drift ? 'Blocked: workspace changed after review' : 'Blocked: failed 3 times',
       killed: 'Blocked: stopped by kill switch', agent_blocked: extra.workerNote ? `Blocked by worker: ${extra.workerNote}` : 'Blocked by worker', user: 'Blocked: you cancelled the run' } as Record<string, string>)[t.blocked_reason!] ?? 'Blocked';
   }
   let waiting: { text: string; action: 'reopen' | 'raise_cap' | 'cancel' } | null = null;
@@ -37,7 +38,7 @@ function decorate(t: TaskRow, ny: Set<string>, extra: { threadStatus: string; ca
     : ny.has(`thread_capped:${t.thread_id}`) ? 'Thread capped' : null;
   const round = t.review_round > 0 || extra.redo ? `round ${extra.redo ? t.review_round + 1 : t.review_round} of 2${extra.redo ? ', redo' : ''}` : null;
   const done = t.status === 'done' ? (t.parent_id ? 'Done' : t.accepted_at ? 'Accepted' : 'Ready, not accepted') : null;
-  return { ...t, reason, waiting, flag, round, done, replies: extra.replies, cost: extra.cost, files: extra.files, badge: extra.badge };
+  return { ...t, reason, waiting, flag, round, done, queued: extra.queued ?? null, help_escalated_to_user: extra.escalated, replies: extra.replies, cost: extra.cost, files: extra.files, badge: extra.badge };
 }
 
 export function bootstrap() {
@@ -56,6 +57,11 @@ export function bootstrap() {
       const a = d.prepare(`SELECT * FROM approvals WHERE id=?`).get(n.ref_id) as any;
       detail = { approval: { ...a, payload: JSON.parse(a.payload) } };
       if (a.kind === 'create_top_level_task') keys.add(`approval:task:${a.task_id}`);
+      else if (a.kind === 'spend' && detail.approval.payload?.action === 'spawn_worker') {            // PHASE2 §B2 "From:" line
+        const th = d.prepare(`SELECT id, title FROM threads WHERE id=?`).get(a.thread_id) as any;
+        const um = d.prepare(`SELECT body FROM messages WHERE thread_id=? AND author_kind='user' AND created_at <= ? ORDER BY id DESC LIMIT 1`).get(a.thread_id, a.created_at) as { body: string } | undefined;
+        detail.origin = { thread_id: a.thread_id, thread_title: th?.title ?? '', user_message: um?.body.split('\n')[0].slice(0, 120) ?? null };
+      }
     } else if (n.item_type === 'help') {
       detail = { message: d.prepare(`SELECT * FROM messages WHERE id=?`).get(n.ref_id) };
       if (n.task_id) keys.add(`help:${n.task_id}`);
@@ -76,7 +82,16 @@ export function bootstrap() {
     const cost = (d.prepare(`SELECT ifnull(sum(cost_usd),0) c FROM jobs WHERE task_id=?`).get(t.id) as any).c;
     const art = d.prepare(`SELECT files FROM artifacts WHERE task_id=? AND (verdict IS NULL OR verdict<>'superseded') ORDER BY id DESC LIMIT 1`).get(t.id) as any;
     const lastFail = d.prepare(`SELECT failure_kind FROM jobs WHERE task_id=? AND status='failed' ORDER BY id DESC LIMIT 1`).get(t.id) as any;
-    const escalated = !!d.prepare(`SELECT 1 FROM messages WHERE thread_id=? AND kind='help' AND EXISTS (SELECT 1 FROM json_each(mentions) WHERE value='user')`).get(t.thread_id);
+    const escalated = helpEscalatedToUser(d, t);
+    // "Queued: <reason>" for any queued job of this task whose agent's reason is not plain run slots (PHASE2 §B1)
+    let queued: string | null = null, helperReason: string | null = null;
+    for (const qj of d.prepare(`SELECT agent_id, kind FROM jobs WHERE task_id=? AND status='queued' ORDER BY id`).all(t.id) as { agent_id: string; kind: string }[]) {
+      const qr = queueReason(d, qj.agent_id);
+      if (!qr || qr.startsWith('run slots')) continue;
+      if (qj.kind === 'help' && t.status === 'blocked' && t.blocked_reason === 'help' && qj.agent_id !== 'director') helperReason = qr;
+      else if (!queued) queued = qr;
+    }
+    const failedHelper = helpFailed(d, t) ? (d.prepare(`SELECT agent_id FROM jobs WHERE task_id=? AND finished_at IS NOT NULL ORDER BY id DESC LIMIT 1`).get(t.id) as any)?.agent_id : null;
     const redo = !!d.prepare(`SELECT 1 FROM artifacts WHERE task_id=? AND review_cycle=? AND review_round=? AND verdict='superseded'`).get(t.id, t.review_cycle, t.review_round + 1)
       && ['todo', 'in_progress'].includes(t.status);
     const lastJob = d.prepare(`SELECT status, attempts, max_attempts, failure_kind, run_after, exit_code, continuations FROM jobs WHERE task_id=? ORDER BY id DESC LIMIT 1`).get(t.id) as any;
@@ -106,7 +121,7 @@ export function bootstrap() {
       badge = { icon: '⟲', text: 'Claim expired, requeued' };
     }
     return decorate(t, keys, { threadStatus: t.thread_status, capRaises: t.cap_raises, replies, cost, files: art ? JSON.parse(art.files).length : 0,
-      drift: lastFail?.failure_kind === 'workspace_drift', hfailed: helpFailed(d, t), escalated, redo, workerNote, badge });
+      drift: lastFail?.failure_kind === 'workspace_drift', hfailed: helpFailed(d, t), escalated, redo, workerNote, badge, helperReason, failedHelper, queued });
   });
   const threads = d.prepare(`SELECT th.*, (SELECT id FROM tasks WHERE thread_id=th.id) AS task_id,
       (SELECT body FROM messages WHERE thread_id=th.id ORDER BY id LIMIT 1) AS first_body,
@@ -138,8 +153,13 @@ export function bootstrap() {
     agents: d.prepare(`SELECT a.*, (SELECT count(*) FROM jobs WHERE agent_id=a.id AND status='queued') AS queued,
       (SELECT started_at FROM jobs WHERE agent_id=a.id AND status='running') AS running_since,
       (SELECT task_id FROM jobs WHERE agent_id=a.id AND status='running') AS running_task,
-      (SELECT attempts || '/' || max_attempts FROM jobs WHERE agent_id=a.id AND status='queued' AND attempts>0 ORDER BY id LIMIT 1) AS retrying
-      FROM agents a ORDER BY a.role`).all(),
+      (SELECT attempts || '/' || max_attempts FROM jobs WHERE agent_id=a.id AND status='queued' AND attempts>0 ORDER BY id LIMIT 1) AS retrying,
+      (SELECT thread_id FROM jobs WHERE agent_id=a.id AND status='running') AS running_thread,
+      (SELECT task_id FROM jobs WHERE agent_id=a.id AND status='queued' ORDER BY created_at, id LIMIT 1) AS queued_task,
+      (SELECT thread_id FROM jobs WHERE agent_id=a.id AND status='queued' ORDER BY created_at, id LIMIT 1) AS queued_thread,
+      (SELECT t.thread_id FROM tasks t WHERE t.assignee_agent_id=a.id AND t.status='blocked' AND t.blocked_reason='help' ORDER BY t.id LIMIT 1) AS waiting_thread
+      FROM agents a ORDER BY (a.role <> 'director'), a.created_at, a.rowid`).all().map((a: any) => ({ ...a, queue_reason: queueReason(d, a.id),
+        budget: agentNumbers(d, a.id) })),
     needsYou: items,
     recentlyExpired: d.prepare(`SELECT a.*, t.title AS task_title FROM approvals a LEFT JOIN tasks t ON t.id=a.task_id WHERE a.status='expired' AND a.decided_at >= ? ORDER BY a.decided_at DESC`).all(now() - 86_400_000),
     tasks, threads,
@@ -154,7 +174,10 @@ export function threadView(id: number) {
   const task = d.prepare(`SELECT * FROM tasks WHERE thread_id=?`).get(id);
   const running = d.prepare(`SELECT agent_id, kind FROM jobs WHERE thread_id=? AND status='running'`).all(id);
   const artifacts = task ? d.prepare(`SELECT id, review_cycle, review_round, verdict, created_at FROM artifacts WHERE task_id=? ORDER BY id`).all((task as any).id) : [];
-  return { thread: th, messages, task, running, artifacts, preview: th.status === 'open' ? preview(id) : null };
+  // PHASE2 §B2: the director respond job queued by a spawn approval in this thread, until it starts
+  const spawn_queued = !!d.prepare(`SELECT 1 FROM jobs j WHERE j.thread_id=? AND j.agent_id='director' AND j.kind='respond' AND j.status='queued' AND j.trigger_message_id IS NULL
+    AND EXISTS (SELECT 1 FROM approvals a WHERE a.thread_id=j.thread_id AND a.kind='spend' AND a.status='consumed' AND json_extract(a.payload,'$.action')='spawn_worker')`).get(id);
+  return { thread: th, messages, task, running, artifacts, spawn_queued, preview: th.status === 'open' ? preview(id) : null };
 }
 
 export function taskView(id: number) {

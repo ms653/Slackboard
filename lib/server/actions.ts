@@ -4,7 +4,8 @@ import { now, DomainError } from '../util';
 import { emit } from '../domain/events';
 import { getTask } from '../domain/rounds';
 import { workspaceFacts } from '../domain/git';
-import { createTask, decideApproval, cancelTask, reopenTask, acceptTask, unblockTask } from '../domain/tasks';
+import { createTask, decideApproval, cancelTask, reopenTask, acceptTask, unblockTask, reassignTask } from '../domain/tasks';
+import { createWorkerByUser, setEnabled, retireAgent, setAgentBudget, setMaxConcurrency, ensureAgentDir } from '../domain/agents';
 import { closeThread, reopenThread, raiseCap, createThread } from '../domain/threads';
 import { postUserMessage, wakePreview } from '../domain/wake';
 import { cancelQueued, refreshAllPresence, refreshPresence } from '../domain/jobs';
@@ -39,11 +40,11 @@ export function newTask(o: { title: string; description?: string; acceptance?: s
   if (!o.title?.trim()) throw new DomainError('validation_error', 'title is required', 400);
   const d = db();
   const r = tx(d, () => createTask(d, { title: o.title.trim().slice(0, 200), description: o.description ?? '', acceptance: o.acceptance ?? '',
-    assignee: o.assignee ?? 'worker', by: { kind: 'user' } }));
+    assignee: o.assignee, by: { kind: 'user' } }));
   wake(); return r;
 }
 
-export function taskAction(id: number, action: string, note?: string) {
+export function taskAction(id: number, action: string, note?: string, assignee?: string) {
   const d = db();
   const t0 = getTask(d, id); if (!t0) throw new DomainError('not_found', 'no such task', 404);
   const ws = action === 'unblock' ? workspaceFacts(id) : undefined;
@@ -53,6 +54,9 @@ export function taskAction(id: number, action: string, note?: string) {
       case 'cancel': cancelTask(d, t, 'user'); return {};
       case 'reopen': reopenTask(d, t, note ?? ''); return {};
       case 'accept': acceptTask(d, t); return {};
+      case 'reassign':
+        if (typeof assignee !== 'string') throw new DomainError('validation_error', 'assignee is required', 400);
+        reassignTask(d, t, assignee); return {};
       case 'unblock': return { target: unblockTask(d, t, 'user', 'retry', ws!, note) };
       default: throw new DomainError('validation_error', `unknown action ${action}`, 400);
     }
@@ -99,9 +103,9 @@ export function jobLog(id: number) {
   return { ...j, lines };
 }
 
-export function decide(id: number, decision: 'approved' | 'rejected', note?: string) {
+export function decide(id: number, decision: 'approved' | 'rejected', note?: string, raiseTo?: number) {
   const d = db();
-  tx(d, () => decideApproval(d, id, decision, note)); wake(); return {};
+  const r = tx(d, () => decideApproval(d, id, decision, note, { raise_concurrency_to: raiseTo })); wake(); return r;
 }
 
 export function threadAction(id: number, action: 'close' | 'reopen' | 'raise_cap') {
@@ -124,7 +128,7 @@ export function pause(action: 'resume' | 'hold') {
   wake(); return {};
 }
 
-export function setBudgets(b: { day_usd?: number; day_jobs?: number; jobs_5h?: number; max_concurrency?: number }) {
+export function setBudgets(b: { day_usd?: number; day_jobs?: number; jobs_5h?: number; max_concurrency?: number; agents?: Record<string, { day_usd?: unknown; day_jobs?: unknown }> }) {
   const d = db();
   const bad = (v: unknown) => v !== undefined && !(typeof v === 'number' && v > 0);
   if (bad(b.day_usd) || bad(b.day_jobs) || bad(b.jobs_5h)) throw new DomainError('validation_error', 'values must be > 0', 400);
@@ -136,6 +140,7 @@ export function setBudgets(b: { day_usd?: number; day_jobs?: number; jobs_5h?: n
       d.prepare(`UPDATE budgets SET limit_usd=coalesce(?,limit_usd), limit_jobs=coalesce(?,limit_jobs), updated_at=? WHERE scope='global' AND period='day'`).run(b.day_usd ?? null, b.day_jobs ?? null, now());
     if (b.jobs_5h !== undefined) d.prepare(`UPDATE budgets SET limit_jobs=?, updated_at=? WHERE scope='global' AND period='rolling_5h'`).run(b.jobs_5h, now());
     if (b.max_concurrency !== undefined) d.prepare(`UPDATE system_state SET max_concurrency=? WHERE id=1`).run(b.max_concurrency);
+    for (const [aid, v] of Object.entries(b.agents ?? {})) setAgentBudget(d, aid, v?.day_usd, v?.day_jobs);       // PHASE2 §T5.5: validates 1.00-3.00 / 1-20
     emit(d, 'settings.changed', 'user', 'budget', null, { old, new: budgetsView() });
     refreshAllPresence(d);
   });
@@ -150,12 +155,19 @@ export function budgetsView() {
 }
 export function setAgent(id: string, enabled: boolean) {
   const d = db();
-  tx(d, () => {
-    const r = d.prepare(`UPDATE agents SET enabled=? WHERE id=?`).run(enabled ? 1 : 0, id);
-    if (!r.changes) throw new DomainError('not_found', '', 404);
-    emit(d, 'settings.changed', 'user', 'agent', id, { enabled }); refreshPresence(d, id);
-  });
+  tx(d, () => setEnabled(d, id, enabled));
   wake(); return {};
+}
+export function retire(id: string) {
+  const d = db();
+  tx(d, () => retireAgent(d, id));
+  wake(); return {};
+}
+export function addAgent(b: { name?: unknown; skill_note?: unknown; daily_usd?: unknown; daily_jobs?: unknown }) {
+  const d = db();
+  const name = tx(d, () => createWorkerByUser(d, b));
+  ensureAgentDir(name);
+  wake(); return { agent_id: name };
 }
 export async function doctor() {
   const r = await control(db(), 'doctor', {}, 2000);

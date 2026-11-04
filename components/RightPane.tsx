@@ -68,7 +68,7 @@ function ThreadPane({ id }: { id: number }) {
           ? <div className="p-3 text-sm flex flex-wrap items-center gap-2">Thread reached its limit. Agents can no longer post here.
               {th.cap_raises ? <span>Cap already raised once.</span> : <ActionButton label="Raise cap" kind="primary" run={() => threadAct('raise_cap')} />}
               <ActionButton label="Close thread" run={() => threadAct('close')} /></div>
-          : <Composer threadId={id} preview={data.preview} threadStatus={th.status} label="Reply…" />}
+          : <Composer threadId={id} preview={data.preview} threadStatus={th.status} label="Reply…" spawnQueued={data.spawn_queued} />}
     </>}>
       <div className="p-3 flex gap-2 items-center flex-wrap text-sm border-b border-slate-800">
         {task && <button className="underline" onClick={() => open({ kind: 'task', id: task.id })}>Task T-{task.id} · <TaskStatus s={task.status} /></button>}
@@ -96,8 +96,10 @@ const JOB_ICON: Record<string, string> = { queued: '◔', running: '●', succee
 
 function TaskPane({ id }: { id: number }) {
   const { data, err } = useFetch<any>(`/api/tasks/${id}`);
-  const { boot, open, refresh, toast } = useStore();
+  const { boot, open, refresh, toast, openSettingsAgent, set, setView, close } = useStore();
   const [dlg, setDlg] = useState<React.ReactNode>(null);
+  const [reTo, setReTo] = useState('');
+  const [rsErr, setRsErr] = useState<string | null>(null);
   if (err) return <PaneShell title={`T-${id}`}><p role="alert" className="p-4 text-rose-300">Couldn&apos;t load task ({err}).</p></PaneShell>;
   if (!data) return <PaneShell title={`T-${id}`}><p className="p-4 text-slate-400">Loading…</p></PaneShell>;
   const t = data.task;
@@ -105,10 +107,23 @@ function TaskPane({ id }: { id: number }) {
   const post = async (action: string, note?: string) => { const r = await api(`/api/tasks/${id}`, { body: { action, note } }); await refresh(); return r; };
   const note = (title: string, label: string, confirm: string, action: string, required = true) =>
     setDlg(<NoteDialog title={title} label={label} confirm={confirm} required={required} onClose={() => setDlg(null)} onDone={async (n) => { const r = await post(action, n); if (action === 'unblock') toast(retryToast(r, id)); }} />);
+  const enabledWorkers = boot.agents.filter((a: any) => a.role === 'worker' && a.enabled && !a.retired_at);
+  const agentTop = t.created_by_kind === 'agent' && !t.parent_id;
   const cancel = () => setDlg(<Dialog title={`Cancel T-${id}?`} onClose={() => setDlg(null)}>
     <p className="text-sm mb-3">Queued runs are cancelled and a running agent is stopped.</p>
+    {agentTop && enabledWorkers.length > 0 && <div className="mb-3 text-sm">
+      <label htmlFor="re-to" className="block text-xs mb-1">Re-propose to</label>
+      <select id="re-to" className="input" value={reTo || t.assignee_agent_id || enabledWorkers[0].id} onChange={(e) => setReTo(e.target.value)}>
+        {enabledWorkers.map((a: any) => <option key={a.id} value={a.id}>{a.display_name}</option>)}</select>
+      <div className="mt-2"><ActionButton label={`Cancel and ask the director to re-propose to ${reTo || t.assignee_agent_id || enabledWorkers[0].id}`} run={async () => {
+        const to = reTo || t.assignee_agent_id || enabledWorkers[0].id;
+        await post('cancel'); setDlg(null); toast(`T-${id} cancelled`);
+        set({ composerPrefill: `@director Re-propose T-${id} "${t.title}" assigned to ${to}.` }); setView('chat'); close(); }} /></div></div>}
     <div className="flex justify-end gap-2"><button className="btn bg-slate-700" onClick={() => setDlg(null)}>Keep</button>
       <ActionButton label="Cancel task" kind="danger" run={async () => { await post('cancel'); setDlg(null); toast(`T-${id} cancelled`); }} /></div></Dialog>);
+  const helper: string | null = t.help_agent_id ?? null;
+  const reassignable = t.status === 'todo' || (t.status === 'blocked' && t.blocked_reason !== 'help');
+  const reassignTo = enabledWorkers.filter((a: any) => a.id !== helper && a.id !== t.assignee_agent_id);
   const cancelJob = (j: any) => setDlg(<Dialog title="Cancel this job?" onClose={() => setDlg(null)}>
     {j.status === 'running' && ['work', 'review'].includes(j.kind) && <p className="text-sm mb-3">T-{id} becomes Blocked: you cancelled the run</p>}
     <div className="flex justify-end gap-2"><button className="btn bg-slate-700" data-autofocus onClick={() => setDlg(null)}>Keep</button>
@@ -137,6 +152,20 @@ function TaskPane({ id }: { id: number }) {
       <div className="p-3 space-y-3 text-sm">
         {card.reason && <p className="text-rose-200"><span aria-hidden>⏸</span> {card.reason}</p>}
         {card.waiting && <p className="text-amber-200"><span aria-hidden>⏸</span> {card.waiting.text}</p>}
+        {card.queued && <p className="text-amber-200">Queued: {card.queued}{' '}
+          {card.queued === 'agent budget' && <button className="underline text-sky-300" onClick={() => openSettingsAgent({ agent: t.assignee_agent_id, field: 'usd' })}>Edit budget</button>}
+          {card.queued === 'disabled' && <button className="underline text-sky-300" onClick={() => openSettingsAgent({ agent: t.assignee_agent_id, field: 'enabled' })}>Enable</button>}</p>}
+        {t.status === 'blocked' && t.blocked_reason === 'help' && <p className="text-slate-300">Waiting on {helper ?? 'the helper'}; reroute help or reply first</p>}
+        {reassignable && agentTop && <p className="text-slate-300">Proposed by the director; to move it, cancel and ask the director to re-propose.</p>}
+        {reassignable && !agentTop && (enabledWorkers.length === 0
+          ? <p className="text-amber-200">No worker is enabled. <button className="underline text-sky-300" onClick={() => openSettingsAgent({ agent: t.assignee_agent_id, field: 'enabled' })}>Enable</button></p>
+          : <div><label htmlFor="reassign" className="text-xs uppercase text-slate-400 mr-2">Reassign</label>
+              <select id="reassign" className="input" value="" onChange={async (e) => {
+                const to = e.target.value; if (!to) return; setRsErr(null);
+                try { await api(`/api/tasks/${id}`, { body: { action: 'reassign', assignee: to } }); await refresh(); toast(`T-${id} reassigned to ${to}`); }
+                catch (er: any) { setRsErr(er.hint || er.code); } }}>
+                <option value="">Reassign…</option>{reassignTo.map((a: any) => <option key={a.id} value={a.id}>{a.display_name}</option>)}</select>
+              {rsErr && <span role="alert" className="text-xs text-rose-300 ml-2">{rsErr}</span>}</div>)}
         <h3 className="font-semibold text-base">{t.title}</h3>
         <button className="text-xs underline" onClick={() => open({ kind: 'thread', id: t.thread_id })}>Open thread</button>
         {t.parent_id && <p className="text-xs"><button className="underline" onClick={() => open({ kind: 'task', id: t.parent_id })}>↳ subtask of T-{t.parent_id}</button></p>}
@@ -215,7 +244,12 @@ function LogPane({ id }: { id: number }) {
 
 function NewTaskPane() {
   const { refresh, open, toast, boot } = useStore();
-  const [f, setF] = useState({ title: '', description: '', acceptance: '', assignee: 'worker' });
+  const enabled = boot.agents.filter((a: any) => a.role === 'worker' && a.enabled && !a.retired_at);
+  const open_ = (id: string) => boot.tasks.filter((t: any) => t.assignee_agent_id === id && ['proposed', 'todo', 'in_progress', 'in_review', 'blocked'].includes(t.status)).length;
+  const fewest = enabled.slice().sort((a: any, b: any) => open_(a.id) - open_(b.id))[0]?.id ?? '';     // T1: fewest open tasks, ties by created_at
+  const [f, setF] = useState({ title: '', description: '', acceptance: '', assignee: '' });
+  const assignee = enabled.some((a: any) => a.id === f.assignee) ? f.assignee : fewest;
+  const { openSettingsAgent } = useStore();
   return (
     <PaneShell title="New task">
       <form className="p-3 space-y-3 text-sm" onSubmit={(e) => e.preventDefault()}>
@@ -223,11 +257,13 @@ function NewTaskPane() {
         <div><label htmlFor="nt-desc" className="block mb-1">Description</label><textarea id="nt-desc" className="input w-full h-24" value={f.description} onChange={(e) => setF({ ...f, description: e.target.value })} /></div>
         <div><label htmlFor="nt-acc" className="block mb-1">Acceptance criteria</label><textarea id="nt-acc" className="input w-full h-20" value={f.acceptance} onChange={(e) => setF({ ...f, acceptance: e.target.value })} /></div>
         <div><label htmlFor="nt-as" className="block mb-1">Assignee</label>
-          <select id="nt-as" className="input" value={f.assignee} onChange={(e) => setF({ ...f, assignee: e.target.value })}>
-            {boot.agents.filter((a: any) => a.role === 'worker').map((a: any) => <option key={a.id} value={a.id}>{a.display_name}</option>)}</select></div>
-        <ActionButton label="Create" kind="primary" disabled={!f.title.trim()} run={async () => {
-          const r: any = await api('/api/tasks', { body: f }); await refresh(); toast(`T-${r.task_id} created`); open({ kind: 'task', id: r.task_id }); }} />
-        <p className="text-xs text-slate-400">Will wake worker. Lands in To do; no approval needed (you are acting).</p>
+          {enabled.length === 0
+            ? <p id="nt-as-none" className="text-sm text-amber-200">No worker is enabled. <button type="button" className="underline text-sky-300" onClick={() => openSettingsAgent({ agent: boot.agents.find((a: any) => a.role === 'worker' && !a.retired_at)?.id ?? 'worker', field: 'enabled' })}>Enable</button></p>
+            : <select id="nt-as" className="input" value={assignee} onChange={(e) => setF({ ...f, assignee: e.target.value })}>
+                {enabled.map((a: any) => <option key={a.id} value={a.id}>{a.display_name}</option>)}</select>}</div>
+        <ActionButton label="Create" kind="primary" disabled={!f.title.trim() || enabled.length === 0} title={enabled.length === 0 ? 'No worker is enabled' : undefined} run={async () => {
+          const r: any = await api('/api/tasks', { body: { ...f, assignee } }); await refresh(); toast(`T-${r.task_id} created`); open({ kind: 'task', id: r.task_id }); }} />
+        <p className="text-xs text-slate-400">Will wake {assignee || 'the assignee'}. Lands in To do; no approval needed (you are acting).</p>
       </form>
     </PaneShell>
   );

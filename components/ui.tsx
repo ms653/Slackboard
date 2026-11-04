@@ -18,9 +18,9 @@ const PRES: Record<string, [string, string, string]> = {
   reviewing: ['◐', 'Reviewing', 'text-amber-300'], blocked: ['⏸', 'Waiting on you', 'text-rose-300'],
   failed: ['✕', 'Failed', 'text-rose-300'], paused: ['⊘', 'Paused', 'text-amber-300'], disabled: ['–', 'Disabled', 'text-slate-400'],
 };
-export function Presence({ a, now, pauseLabel }: { a: any; now: number; pauseLabel?: string }) {
-  const [i, t, c] = PRES[a.presence] ?? ['?', a.presence, ''];
-  let label = t;
+/** Label variants for PHASE2 §B1; the `presence` enum is unchanged, the detail picks the text. */
+export function presenceLabel(a: any, now: number, pauseLabel?: string): string {
+  let label = (PRES[a.presence] ?? ['?', a.presence, ''])[1];
   if (a.presence === 'working' && a.running_since) {
     const s = Math.max(0, Math.floor((now - a.running_since) / 1000));
     label = `Working · ${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
@@ -28,10 +28,15 @@ export function Presence({ a, now, pauseLabel }: { a: any; now: number; pauseLab
   if (a.presence === 'reviewing' && a.running_task) label = `Reviewing T-${a.running_task}`;
   if (a.presence === 'queued') label = `Queued (${a.queued})`;
   if (a.presence === 'failed' && a.retrying) label = `Failed · Retry ${a.retrying}`;
-  if (a.presence === 'paused' && pauseLabel) label = `Paused: ${pauseLabel}`;
+  if (a.presence === 'paused') label = a.presence_detail === 'agent budget' ? 'Paused: agent budget' : pauseLabel ? `Paused: ${pauseLabel}` : label;
+  return label;
+}
+export const PRESENCE_ICON = (presence: string) => (PRES[presence] ?? ['?'])[0];
+export function Presence({ a, now, pauseLabel }: { a: any; now: number; pauseLabel?: string }) {
+  const [i, , c] = PRES[a.presence] ?? ['?', a.presence, ''];
+  const label = presenceLabel(a, now, pauseLabel);
   return <span className={`inline-flex items-center gap-1 ${c}`}><span aria-hidden>{i}</span>{label}</span>;
 }
-
 /** Mutating button: pending label, disabled while in flight, inline role=alert error (UX §8). */
 export function ActionButton(p: {
   label: string; pending?: string; run: () => Promise<unknown>; kind?: 'default' | 'primary' | 'danger';

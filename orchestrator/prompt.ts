@@ -2,6 +2,8 @@ import fs from 'node:fs';
 import type { DB } from '@/lib/db';
 import type { JobRow } from '@/lib/domain/jobs';
 import { getTask, currentArtifact } from '@/lib/domain/rounds';
+import { agentRole } from '@/lib/domain/jobs';
+import { enabledWorkerIds } from '@/lib/domain/agents';
 
 /** XML-escape so embedded content cannot close or forge tags (TECH §6.3). */
 export const esc = (s: string): string => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -11,7 +13,8 @@ const MAX = 24 * 1024;
 export function renderPrompt(db: DB, j: JobRow, reason: string | null): string {
   const t = j.task_id ? getTask(db, j.task_id) : undefined;
   const parts: string[] = [];
-  parts.push(`<job id="${j.id}" kind="${j.kind}" agent="${j.agent_id}" attempt="${j.attempts}"${t ? ` task="T-${t.id}"` : ''} thread="${j.thread_id}"${t ? ` review_round="${t.review_round}" max_review_rounds="2"` : ''}/>`);
+  parts.push(`<job id="${j.id}" kind="${j.kind}" agent="${j.agent_id}" attempt="${j.attempts}"${t ? ` task="T-${t.id}"` : ''} thread="${j.thread_id}"${t ? ` review_round="${t.review_round}" max_review_rounds="2"` : ''} role="${agentRole(db, j.agent_id)}"/>`);
+  parts.push(team(db));
   if (t) {
     parts.push(`<task id="T-${t.id}" status="${t.status}" assignee="${t.assignee_agent_id ?? ''}" parent="${t.parent_id ?? ''}">
   <title>${esc(t.title)}</title>
@@ -46,9 +49,17 @@ export function renderPrompt(db: DB, j: JobRow, reason: string | null): string {
   return out;
 }
 
+/** <team>: one line per active agent (PHASE2 §T4.3). The skill note is user-approved text, so escaped but not <untrusted>. */
+export function team(db: DB): string {
+  const rows = db.prepare(`SELECT id, role, enabled, presence, skill_note FROM agents WHERE retired_at IS NULL ORDER BY (role <> 'director'), created_at, rowid`).all() as any[];
+  const lines = rows.map((a) => `  <agent id="${a.id}" role="${a.role}" enabled="${a.enabled}" presence="${a.presence}"${a.skill_note ? ` skill="${esc(a.skill_note)}"` : ''}/>`);
+  if (!enabledWorkerIds(db).length) lines.push('  no enabled worker');
+  return `<team>\n${lines.join('\n')}\n</team>`;
+}
+
 function instructions(j: JobRow, t: ReturnType<typeof getTask>): string {
   if (j.kind === 'review' && t) return `Review T-${t.id} round ${t.review_round} of 2 against the acceptance criteria. End with update_task approve or request_changes.`;
   if (j.kind === 'work' && t) return `Do T-${t.id} in your working directory. End with exactly one handoff: update_task submit_for_review, request_help, or update_task block.`;
-  if (j.kind === 'help' && t) return `The worker asked for help on T-${t.id}. Answer with post_message (wake: true, mentions ["worker"]), or escalate with request_help to the user.`;
+  if (j.kind === 'help' && t) return `The worker asked for help on T-${t.id}. Answer with post_message (wake: true, mentions ["${t.assignee_agent_id}"]), or escalate with request_help to the user.`;
   return `Respond to the latest message in thread ${j.thread_id}. Create a task if work is needed; otherwise answer with post_message. Post nothing if nothing needs saying.`;
 }

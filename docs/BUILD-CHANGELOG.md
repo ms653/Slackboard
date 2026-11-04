@@ -37,3 +37,4 @@ Open non-blocking notes:
 - `dropHandlers` is registered during render. Move it into a `useEffect`.
 - `--doctor-only` races the signal handler on exit.
 - Release gate: the manual smoke test against the real `claude` binary (TECH §11).
+Phase 2 increment 1: MIGRATION 2 + dynamic worker spawning, agent lifecycle (A1-A6, R1), per-agent budgets, claim/queueReason/presence, agents list, spawn approval card, Settings workers -> lib/db/{index,migrations}.ts, lib/domain/{agents,claim,jobs,tasks,tools,finish,rounds,wake}.ts, lib/server/{actions,read,route}.ts, lib/util.ts, app/api/agents/**, app/api/{budgets,tasks,approvals}/**, orchestrator/{main,prompt,spawn,toolserver}.ts, prompts/{worker,director}.md, components/{AgentsList,AgentsSettings,App,NeedsYou,RightPane,Views,Sidebar,Composer,QuickSwitcher,ui,store,api}.tsx, test/fake-claude/claude, test/unit/{phase2,ddl}.test.ts, test/e2e/{phase2,phase2_http}.test.ts

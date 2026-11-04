@@ -135,7 +135,7 @@ export default function App() {
             {v === 'inbox' ? `Inbox (${boot.needsYou.length})` : l}</button>)}
       </div>
       <ul aria-label="Agents" className="md:hidden flex flex-wrap gap-x-4 gap-y-1 px-3 py-1.5 border-b border-slate-700 text-xs">
-        {boot.agents.map((a: any) => <li key={a.id} className="flex items-center gap-1.5"><span className="font-medium">{a.display_name}</span>
+        {boot.agents.filter((a: any) => !a.retired_at).map((a: any) => <li key={a.id} className="flex items-center gap-1.5"><span className="font-medium">{a.display_name}</span>
           <Presence a={a} now={now} pauseLabel={PAUSE_LABEL[boot.system.blocked_by] ?? undefined} />
           {a.presence === 'working' && a.presence_detail ? <span className="text-slate-400 truncate max-w-[10rem]">{a.presence_detail}</span> : null}</li>)}
       </ul>
@@ -166,7 +166,8 @@ export default function App() {
       <div aria-live="polite" className="fixed bottom-4 left-1/2 -translate-x-1/2 z-50 space-y-2">
         {toasts.map((t) => <div key={t.id} role={t.tone === 'error' ? 'alert' : 'status'}
           className={`px-4 py-2 rounded shadow text-sm flex gap-3 ${t.tone === 'error' ? 'bg-rose-800' : 'bg-slate-700'}`}>
-          {t.text}<button aria-label="Dismiss" onClick={() => dismiss(t.id)}>✕</button></div>)}
+          {t.text}{t.actions?.map((a) => <button key={a.label} className="underline font-semibold" onClick={async () => { try { await a.run(); } finally { dismiss(t.id); } }}>{a.label}</button>)}
+          <button aria-label="Dismiss" onClick={() => dismiss(t.id)}>✕</button></div>)}
       </div>
       {switcher && <QuickSwitcher onClose={() => setSwitcher(false)} />}
       {help && (

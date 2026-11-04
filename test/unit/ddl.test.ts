@@ -8,7 +8,7 @@ describe('DDL and triggers (TECH §11)', () => {
   it('openDb leaves WAL off for :memory: but foreign_keys on, and migrate is idempotent', () => {
     const db = freshEnv();
     expect(db.pragma('foreign_keys', { simple: true })).toBe(1);
-    expect(db.pragma('user_version', { simple: true })).toBe(1);
+    expect(db.pragma('user_version', { simple: true })).toBe(2);
   });
   it('file DB is WAL', () => {
     freshEnv();

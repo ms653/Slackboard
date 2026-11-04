@@ -6,14 +6,16 @@ export type View = 'inbox' | 'chat' | 'board' | 'settings';
 export type Pane =
   | { kind: 'thread'; id: number } | { kind: 'task'; id: number } | { kind: 'review'; id: number }
   | { kind: 'log'; id: number } | { kind: 'newtask' };
-export interface Toast { id: number; text: string; tone?: 'info' | 'error' }
+export interface Toast { id: number; text: string; tone?: 'info' | 'error'; actions?: { label: string; run: () => Promise<unknown> | void }[] }
+/** Deep link into Settings → Agents (PHASE2 §B1/§B6): scroll to the agent and focus the $/day input or the Enabled checkbox. */
+export interface AgentFocus { agent: string; field: 'usd' | 'enabled' | 'row' }
 
 interface S {
   boot: any | null; loadError: string | null; view: View; panes: Pane[]; toasts: Toast[];
   sse: 'live' | 'reconnecting' | 'offline'; sessionExpired: boolean; rev: number; killFailed: boolean;
-  settingsFocus: string | null; settingsPrefill: Record<string, number> | null; composerPrefill: string | null;
+  settingsAgentFocus: AgentFocus | null; settingsFocus: string | null; settingsPrefill: Record<string, number> | null; composerPrefill: string | null;
   setView(v: View): void; open(p: Pane): void; back(): void; close(): void; refresh(): Promise<void>;
-  toast(text: string, tone?: Toast['tone']): void; dismiss(id: number): void; set(p: Partial<S>): void;
+  toast(text: string, tone?: Toast['tone'], actions?: Toast['actions']): void; openSettingsAgent(f: AgentFocus): void; dismiss(id: number): void; set(p: Partial<S>): void;
 }
 
 let toastId = 0;
@@ -21,7 +23,8 @@ let toastId = 0;
 let opener: HTMLElement | null = null;
 export const useStore = create<S>((set, get) => ({
   boot: null, loadError: null, view: 'chat', panes: [], toasts: [], sse: 'live', sessionExpired: false, rev: 0, killFailed: false,
-  settingsFocus: null, settingsPrefill: null, composerPrefill: null,
+  settingsFocus: null, settingsPrefill: null, composerPrefill: null, settingsAgentFocus: null,
+  openSettingsAgent: (f) => set({ settingsAgentFocus: f, view: 'settings' }),
   setView: (view) => set({ view }),
   open: (p) => {
     if (get().panes.length === 0) opener = typeof document !== 'undefined' ? document.activeElement as HTMLElement | null : null;
@@ -44,10 +47,10 @@ export const useStore = create<S>((set, get) => ({
       if (!get().boot) set({ loadError: `${e.status ? 'HTTP ' + e.status + ' ' : ''}${e.code}` });
     }
   },
-  toast: (text, tone = 'info') => {
+  toast: (text, tone = 'info', actions) => {
     const id = ++toastId;
-    set((s) => ({ toasts: [...s.toasts, { id, text, tone }] }));
-    setTimeout(() => get().dismiss(id), 6000);
+    set((s) => ({ toasts: [...s.toasts, { id, text, tone, actions }] }));
+    setTimeout(() => get().dismiss(id), actions?.length ? 15000 : 6000);
   },
   dismiss: (id) => set((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) })),
   set: (p) => set(p as any),
