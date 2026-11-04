@@ -74,7 +74,7 @@ try {
   assert.match(await page.locator('#dv-split-reason').innerText(), /needs Expand|needs a window at least 900 px wide/);
   await page.keyboard.press('x');
   assert.equal(await page.locator('button[aria-expanded="true"]').count(), 1);
-  assert.ok(await page.evaluate(() => document.activeElement === document.querySelector('aside[aria-label="Detail"] h2')), 'expand moves focus to the heading');
+  await page.waitForFunction(() => document.activeElement === document.querySelector('aside[aria-label="Detail"] h2'), null, { timeout: 3000 });   // expand moves focus to the heading
   await page.keyboard.press('Tab'); await page.keyboard.press('Tab');
   await page.waitForFunction(() => !document.querySelectorAll('input[name="dv-view"]')[1].disabled);
   await page.locator('[data-cell]').first().focus();
@@ -113,7 +113,7 @@ try {
   // Esc collapses (focus -> Expand button), second Esc closes the pane (focus -> opener)
   await page.keyboard.press('Escape');
   assert.equal(await page.locator('button[aria-expanded="true"]').count(), 0);
-  assert.ok(await page.evaluate(() => document.activeElement?.textContent?.includes('Expand')), 'collapse returns focus to Expand');
+  await page.waitForFunction(() => document.activeElement?.textContent?.includes('Expand'), null, { timeout: 3000 });   // collapse returns focus to Expand
   await page.keyboard.press('Escape');
   assert.equal(await page.locator('aside[aria-label="Detail"]').count(), 0);
   await page.waitForFunction(() => document.activeElement?.hasAttribute('data-task-card'), null, { timeout: 3000 });   // pane close returns focus to the card
