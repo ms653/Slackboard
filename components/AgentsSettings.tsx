@@ -78,9 +78,9 @@ export function AgentsSettings() {
         <span id={`agent-row-${a.id}`} tabIndex={-1} className="text-body font-semibold">{a.display_name}</span>
         <span className="pill bg-fill-strong text-fg-secondary font-normal">{a.model}</span>
         <span className="text-callout text-fg-secondary tabular-nums">{budgetText(a)}</span>
-        <span className="ml-auto flex items-center gap-3 flex-wrap">
+        <span className="ml-auto grid grid-cols-[auto_96px_56px] items-center gap-3 justify-items-end">
         <label className="inline-flex items-center gap-2 text-body"><input id={`agent-${a.id}-enabled`} type="checkbox" className="checkbox" checked={!!a.enabled} onChange={(e) => toggle(a, e.target.checked)} /> Enabled</label>
-        <button className="btn btn-secondary btn-sm" onClick={() => { setEditing(editing === a.id ? null : a.id); setBud({ usd: String(a.budget?.limit_usd ?? 2), jobs: String(a.budget?.limit_jobs ?? 10) }); }}>{a.budget ? 'Edit budget' : 'Set budget'}</button>
+        <button className="btn btn-secondary btn-sm w-full" onClick={() => { setEditing(editing === a.id ? null : a.id); setBud({ usd: String(a.budget?.limit_usd ?? 2), jobs: String(a.budget?.limit_jobs ?? 10) }); }}>{a.budget ? 'Edit budget' : 'Set budget'}</button>
         <button className="btn btn-ghost btn-sm text-danger hover:bg-tint-danger hover:text-danger" onClick={() => retire(a)}>Retire</button>
         </span>
       </div>
@@ -110,7 +110,7 @@ export function AgentsSettings() {
         {live.filter((a) => a.role !== 'worker').map((a) => (
           <li key={a.id} className="group-row">
             <span className="text-body font-semibold">{a.display_name}</span><span className="pill bg-fill-strong text-fg-secondary font-normal">{a.model}</span>
-            <label className="ml-auto inline-flex items-center gap-2 text-body"><input id={`agent-${a.id}-enabled`} type="checkbox" className="checkbox" checked={!!a.enabled} onChange={(e) => toggle(a, e.target.checked)} /> Enabled</label>
+            <span className="ml-auto grid grid-cols-[auto_96px_56px] items-center gap-3 justify-items-end"><label className="inline-flex items-center gap-2 text-body"><input id={`agent-${a.id}-enabled`} type="checkbox" className="checkbox" checked={!!a.enabled} onChange={(e) => toggle(a, e.target.checked)} /> Enabled</label><span /><span /></span>
           </li>))}
         {workers.map(worker)}
       </ul>

@@ -1,5 +1,5 @@
 'use client';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { Fragment, useCallback, useEffect, useRef, useState } from 'react';
 import { useStore, type Pane } from './store';
 import { api } from './api';
 import { Composer } from './Composer';
@@ -106,10 +106,12 @@ function ThreadPane({ id }: { id: number }) {
           : <Composer threadId={id} preview={data.preview} threadStatus={th.status} label="Reply…" spawnQueued={data.spawn_queued} />}
     </div>}>
       <div className="px-4 py-2.5 flex gap-2 items-center flex-wrap text-body border-b border-separator">
-        {task && <button className="btn btn-link inline-flex" onClick={() => open({ kind: 'task', id: task.id })}>Task T-{task.id} · <TaskStatus s={task.status} /></button>}
-        {task && task.review_round > 0 && <span className="text-callout text-fg-secondary">Round {task.review_round} of 2</span>}
+        {(task || sys > 0) && <div className="flex w-full items-center gap-2">
+          {task && <button className="btn btn-link inline-flex" onClick={() => open({ kind: 'task', id: task.id })}>Task T-{task.id} · <TaskStatus s={task.status} /></button>}
+          {task && task.review_round > 0 && <span className="text-callout text-fg-secondary">Round {task.review_round} of 2</span>}
+          {sys > 0 && <button className="btn btn-ghost btn-sm text-fg-tertiary ml-auto" onClick={() => setShowSys((s) => !s)}><Icon as={ChevronRight} size={14} className={showSys ? 'rotate-90' : ''} />{showSys ? 'Hide' : 'Show'} {sys} system event{sys === 1 ? '' : 's'}</button>}
+        </div>}
         {th.status !== 'closed' && <ActionButton small label="Close thread" run={() => threadAct('close')} />}
-        {sys > 0 && <button className="btn btn-ghost btn-sm text-fg-tertiary ml-auto" onClick={() => setShowSys((s) => !s)}><Icon as={ChevronRight} size={14} className={showSys ? 'rotate-90' : ''} />{showSys ? 'Hide' : 'Show'} {sys} system events</button>}
       </div>
       <ol className="py-2" aria-live="polite" data-nav-list="messages">
         {data.messages.map((m: any, i: number) => {
@@ -197,7 +199,7 @@ function TaskPane({ id }: { id: number }) {
   if (!['done', 'cancelled'].includes(t.status)) actions.push(<ActionButton key="cx" label="Cancel task" kind="danger-ghost" run={async () => cancel()} />);
   if (lastArt) actions.push(<button key="df" data-shortcut="d" aria-keyshortcuts="d" className="btn btn-secondary" onClick={() => open({ kind: 'review', id: lastArt.id })}>View diff <kbd aria-hidden className="kbd">d</kbd></button>);
   return (
-    <PaneShell title={<>T-{t.id} · <TaskStatus s={t.status} /> · assignee: {t.assignee_agent_id}{card.round ? ` · ${card.round}` : ''}</>}
+    <PaneShell title={<>T-{t.id} · <TaskStatus s={t.status} /> <span className="text-callout font-normal text-fg-secondary">· assignee: {t.assignee_agent_id}{card.round ? ` · ${card.round}` : ''}</span></>}
       footer={<div className="shrink-0 border-t border-separator px-4 py-3 flex flex-wrap items-center gap-2 bg-content">{actions}</div>}>
       <div className="px-4 py-4 flex flex-col gap-5 text-body">
         {(card.reason || card.waiting || card.queued || (t.status === 'blocked' && t.blocked_reason === 'help') || card.peer_help?.status === 'queued' || (reassignable && agentTop)) && <div className="flex flex-col gap-2">
@@ -236,18 +238,19 @@ function TaskPane({ id }: { id: number }) {
         <div><h4 className={SECTION}>Notes (latest 10)</h4>
           {data.notes.length ? <ul className="space-y-1">{data.notes.map((n: any) => <li key={n.id}><span className="text-fg-tertiary">{n.author_agent_id ?? 'you'}:</span> <span className="whitespace-pre-wrap">{n.body}</span></li>)}</ul> : <p className="text-fg-tertiary">None.</p>}</div>
         <div><h4 className={SECTION}>Jobs</h4>
-          <div className="overflow-x-auto"><table className="w-full text-callout"><tbody>{data.jobs.map((j: any) => {
+          <table className="w-full text-callout"><tbody>{data.jobs.map((j: any) => {
             const [JI, jc] = JOB_ICON[j.status] ?? [Circle, ''];
-            return (
-            <tr key={j.id} className="h-8 border-b border-separator whitespace-nowrap">
-              <td className="pr-3">{j.kind}</td><td className="pr-3">{j.agent_id}</td><td className="pr-3 tabular-nums text-fg-secondary">attempt {j.attempts}/{j.max_attempts}</td>
+            const hasActions = ['queued', 'running'].includes(j.status) || j.attempts > 0;
+            return (<Fragment key={j.id}>
+            <tr className={`h-8 ${hasActions ? '' : 'border-b border-separator'}`}>
+              <td className="pr-3">{j.kind} · {j.agent_id}</td><td className="pr-3 tabular-nums text-fg-secondary">attempt {j.attempts}/{j.max_attempts}</td>
               <td className="pr-3"><span className="inline-flex items-center gap-1"><span className={jc}><Icon as={JI} size={14} /></span> {j.status}{j.failure_kind ? ` (${j.failure_kind})` : ''}</span></td>
-              <td className="pr-3 tabular-nums text-fg-secondary">{j.status === 'running' ? `cap ${usd(j.budget_cap_usd)}` : `${usd(j.cost_usd)} est.`}</td>
-              <td className="text-right"><span className="inline-flex gap-1 items-center">
+              <td className="text-right tabular-nums text-fg-secondary">{j.status === 'running' ? `cap ${usd(j.budget_cap_usd)}` : `${usd(j.cost_usd)} est.`}</td></tr>
+            {hasActions && <tr className="border-b border-separator"><td colSpan={4} className="pb-2"><span className="inline-flex gap-1 items-center">
                 {['queued', 'running'].includes(j.status) && <ActionButton small label="Cancel job" run={async () => cancelJob(j)} />}
                 {j.status === 'queued' && j.attempts > 0 && <ActionButton small label="Retry now" run={async () => { await api(`/api/jobs/${j.id}`, { body: { action: 'retry_now' } }); await refresh(); }} />}
                 {j.attempts > 0 && <button className="btn btn-link text-callout" onClick={() => open({ kind: 'log', id: j.id })}>Open log</button>}
-              </span></td></tr>); })}</tbody></table></div></div>
+              </span></td></tr>}</Fragment>); })}</tbody></table></div>
       </div>
       {dlg}
     </PaneShell>
@@ -285,7 +288,7 @@ function ReviewPane({ id }: { id: number }) {
   return (
     <PaneShell title={<>Review · T-{data.task_id} · round {data.review_round} of 2</>} footer={footer && <div className="shrink-0 border-t border-separator px-4 py-3 flex items-center gap-2 bg-content">{footer}</div>}
       actions={<button ref={expandBtn} className="btn btn-ghost btn-sm" aria-expanded={expanded} aria-keyshortcuts="x" onClick={toggle}><Icon as={expanded ? Minimize2 : Maximize2} size={14} />{expanded ? 'Collapse' : 'Expand'} <kbd aria-hidden className="kbd">x</kbd></button>}>
-      <div className="px-4 py-3 text-body space-y-2">
+      <div className="px-4 py-3 text-body space-y-2 material-bar">
         <p className="flex flex-wrap items-center gap-x-2 gap-y-1">Verdict: {verdict} <span className="text-caption text-fg-tertiary">Captured by server <Time t={data.created_at} now={boot.now} /></span></p>
         {data.verdict_note && <p className="whitespace-pre-wrap text-fg-secondary">Reviewer notes: &ldquo;{data.verdict_note}&rdquo;</p>}
       </div>

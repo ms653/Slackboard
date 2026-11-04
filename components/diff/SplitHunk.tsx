@@ -19,8 +19,8 @@ export function SplitHunk({ hunk, ctx }: { hunk: DiffHunk; ctx: HunkCtx }) {
   return (
     <table className="w-full font-mono text-mono border-collapse table-fixed" aria-label={`Side by side diff of ${ctx.path}, hunk ${ctx.hunkNo}`} aria-rowcount={rows.length + 1}>
       <colgroup><col className="w-11" /><col /><col className="w-11" /><col /></colgroup>
-      <thead><tr><th scope="col" className="sr-only">Old line number</th><th scope="col" className="h-7 px-4 text-left text-caption font-semibold text-fg-tertiary bg-sunken">old</th>
-        <th scope="col" className="sr-only">New line number</th><th scope="col" className="h-7 px-4 text-left text-caption font-semibold text-fg-tertiary bg-sunken border-l border-separator-strong">new</th></tr></thead>
+      <thead><tr className="bg-sunken"><th scope="col" className="bg-sunken"><span className="sr-only">Old line number</span></th><th scope="col" className="h-7 px-4 text-left text-caption font-semibold text-fg-tertiary bg-sunken">old</th>
+        <th scope="col" className="bg-sunken border-l border-separator-strong"><span className="sr-only">New line number</span></th><th scope="col" className="h-7 px-4 text-left text-caption font-semibold text-fg-tertiary bg-sunken border-l border-separator-strong">new</th></tr></thead>
       <tbody>
         {rows.map((r, i) => [
           <tr key={i} className="group">{cell(r.old, 'old', i)}{cell(r.new, 'new', i)}</tr>,

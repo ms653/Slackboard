@@ -1,6 +1,6 @@
 'use client';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { FileText, MessageSquare } from 'lucide-react';
+import { FileText, MessageSquare, Plus } from 'lucide-react';
 import { api } from '../api';
 import { Icon } from '../ui';
 import { useStore } from '../store';
@@ -116,16 +116,20 @@ export function DiffView({ data, show, setShow, reload, expanded, toggleExpand }
     path: f.path, hunkNo: hunkNo(h), lineId: (l) => ids.get(l)!, html: html.get(h), activeKey: effActive, setActive,
     commentBtn: (l) => canComment || gate?.reason === 'worker_running'
       ? <button type="button" tabIndex={-1} disabled={!canComment} aria-label={`Comment on ${anchorSideFor(l)} line ${anchorSideFor(l) === 'old' ? l.oldNo : l.newNo}`} title={commentNote ?? 'Comment (c)'}
-          className="btn btn-secondary btn-sm absolute right-1 top-0.5 z-[1] h-5 font-sans opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus:opacity-100 disabled:opacity-40"
-          onClick={(e) => startComment(l, 'u', f.path, e.currentTarget)}>+ Comment</button> : null,
+          className="btn btn-ghost btn-sm text-accent absolute right-1 top-0.5 z-[1] h-5 bg-content font-sans opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus:opacity-100 disabled:opacity-40"
+          onClick={(e) => startComment(l, 'u', f.path, e.currentTarget)}><Icon as={Plus} size={14} />Comment</button> : null,
     extra: (l, colSpan) => {
       const list = [...(l.type === 'del' ? byKey.get(`${f.path}|old|${l.oldNo}`) ?? [] : []), ...(l.type !== 'del' ? byKey.get(`${f.path}|new|${l.newNo}`) ?? [] : [])];
       const comp = composer && composer.line === l && composer.path === f.path ? composer : null;
       if (!list.length && !comp) return null;
-      return <tr key={`x${ids.get(l)}`}><td colSpan={colSpan} className={`py-2 pr-4 bg-content ${colSpan === 3 ? 'pl-[calc(2*2.75rem+1.25rem)]' : 'pl-4'}`}>
+      const inner = <>
         {list.map((c) => <CommentItem key={c.id} c={c} />)}
         {comp && <CommentComposer id={`cc-${ids.get(l)}`} label={comp.label} onSave={save} onCancel={() => closeComposer()} />}
-      </td></tr>;
+      </>;
+      if (colSpan === 3) return <tr key={`x${ids.get(l)}`}><td colSpan={3} className="py-2 pr-4 bg-content pl-[calc(2*2.75rem+1.25rem)]">{inner}</td></tr>;
+      const cell = <td colSpan={2} className="py-2 pr-4 bg-content pl-[calc(2.75rem+1.25rem)]">{inner}</td>;       // split: the comment sits under the half its line belongs to
+      const blank = <td colSpan={2} className="bg-content" aria-hidden="true" />;
+      return <tr key={`x${ids.get(l)}`}>{l.type === 'del' ? <>{cell}{blank}</> : <>{blank}{cell}</>}</tr>;
     },
   });
 

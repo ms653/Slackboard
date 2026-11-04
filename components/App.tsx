@@ -142,7 +142,7 @@ export default function App() {
               {v === 'inbox' ? `Inbox (${boot.needsYou.length})` : l}</button>)}
         </div>
       </div>
-      <ul aria-label="Agents" className="md:hidden flex flex-wrap gap-x-4 gap-y-1 px-4 py-1.5 border-b border-separator text-callout">
+      <ul aria-label="Agents" className="md:hidden flex flex-wrap gap-x-4 gap-y-1 px-4 py-1.5 border-b border-separator material-bar text-callout">
         {boot.agents.filter((a: any) => !a.retired_at).map((a: any) => <li key={a.id} className="flex items-center gap-1.5"><span className="font-medium">{a.display_name}</span>
           <Presence a={a} now={now} pauseLabel={PAUSE_LABEL[boot.system.blocked_by] ?? undefined} />
           {a.presence === 'working' && a.presence_detail ? <span className="text-fg-tertiary truncate max-w-[10rem]">{a.presence_detail}</span> : null}</li>)}

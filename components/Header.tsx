@@ -110,7 +110,7 @@ export function Header({ onSearch }: { onSearch?: () => void }) {
           {sse === 'offline' && <button className="btn btn-link text-status-warn" onClick={() => location.reload()}>Offline. Retry</button>}
           {killFailed && !s.kill_switch && <span role="status" className="inline-flex items-center gap-1 text-callout font-semibold text-danger"><Icon as={CircleX} size={14} />Kill failed</span>}
           <span className="flex-1" />
-          <button type="button" className="btn btn-ghost btn-sm hidden lg:inline-flex" onClick={onSearch} aria-label="Search (Ctrl+K)" title={`Search (${mod}K)`}><Icon as={Search} />Search<kbd aria-hidden className="kbd">{mod}K</kbd></button>
+          <button type="button" className="btn btn-ghost btn-sm hidden lg:inline-flex" onClick={onSearch} aria-label="Search (Ctrl+K)" title={`Search (${mod}K)`}><Icon as={Search} />Search<kbd aria-hidden className="kbd">{mod === '⌘' ? '⌘K' : `${mod} K`}</kbd></button>
           <button type="button" className="btn btn-ghost btn-icon" onClick={() => setView('settings')} aria-label="Settings (g s)" title="Settings"><Icon as={SettingsIcon} size={18} /></button>
           {s.kill_switch
             ? <button type="button" className="btn btn-primary btn-sm" disabled={s.kill_pending_runs > 0}

@@ -146,7 +146,7 @@ try {
   const card2 = page.locator('[data-task-card]').first(); await card2.waitFor(); await card2.focus();
   await page.keyboard.press('d'); await page.locator('aside h2:has-text("Review · T-")').waitFor();
   await page.locator('text=Worker is running; comment after it submits').first().waitFor();
-  const cb = page.locator('button:has-text("+ Comment")').first();
+  const cb = page.locator('button[aria-label^="Comment on"]').first();
   assert.ok(await cb.isDisabled(), '+ Comment disabled while the worker runs');
   await page.locator('[data-cell]').first().focus(); await page.keyboard.press('c');
   assert.equal(await page.locator('textarea').count(), 0, 'no composer while the worker runs');
@@ -169,7 +169,7 @@ try {
   await page.locator('label:has-text("Changes since round 1")').click();
   const reqH = page.locator('h4:has-text("Round 1 requests")'); await reqH.waitFor();
   assert.match(await reqH.innerText(), /^Round 1 requests \(\d+, read-only\)$/);
-  assert.equal(await page.locator('button:has-text("+ Comment")').count(), 0, 'no [+ Comment] in compare');
+  assert.equal(await page.locator('button[aria-label^="Comment on"]').count(), 0, 'no [+ Comment] in compare');
   console.log('PLAYWRIGHT OK');
 } catch (e) { console.error('PLAYWRIGHT FAIL', e); console.error(log.slice(-1500)); process.exitCode = 1; }
 finally { await cleanup(); console.log('stopped next pid', srv.pid); }

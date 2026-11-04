@@ -28,14 +28,22 @@ export function Chat() {
         {roots.map((th: any) => {
           const you = th.first_author === 'user';
           const who = you ? 'You' : th.first_agent ?? 'system';
+          const chip = you ? '' : th.first_agent ? (th.first_agent === 'director' ? 'director' : 'worker') : 'system';
+          const tk = th.task_id ? boot.tasks.find((t: any) => t.id === th.task_id) : null;
+          if (!you && !th.first_agent) return (
+            <li key={th.id} className="flex items-center gap-2 px-5 py-1 text-callout text-fg-tertiary">
+              <Icon as={tk ? STATUS_ICON(tk.status) : MessageSquare} size={14} className={tk ? STATUS_ICON_CLS(tk.status) : ''} />
+              <span className="min-w-0 truncate">{th.first_body ?? th.title}</span>
+              <button className="btn btn-link text-callout shrink-0" onClick={() => open({ kind: 'thread', id: th.id })}>Open thread</button>
+            </li>);
           return (
           <li key={th.id} className="group flex gap-3 px-5 py-1.5 hover:bg-fill/60 transition-colors duration-fast">
             <Avatar name={who} you={you} />
             <div className="min-w-0 max-w-[72ch]">
               <div className="flex items-baseline gap-2">
                 <span className="text-body font-semibold text-fg-primary">{who}</span>
-                {!you && <RoleChip>{th.first_agent ? (th.first_agent === 'director' ? 'director' : 'worker') : 'system'}</RoleChip>}
-                {th.last_at && <span className="text-caption text-fg-tertiary tabular-nums"><Time t={th.created_at} now={boot.now} /></span>}
+                {chip && chip !== who && <RoleChip>{chip}</RoleChip>}
+                <span className="text-caption text-fg-tertiary tabular-nums"><Time t={th.last_at ?? th.created_at} now={boot.now} /></span>
                 {th.status !== 'open' && <span className="text-caption text-fg-tertiary">· thread {th.status}</span>}
               </div>
               <div className="text-body-lg text-fg-primary whitespace-pre-wrap break-words line-clamp-3"><Rich text={th.first_body ?? th.title} /></div>
@@ -113,6 +121,14 @@ export function Board({ now }: { now: number }) {
   const [showCancelled, setShowCancelled] = useState(false);
   const [allDone, setAllDone] = useState(false);
   const [over, setOver] = useState<string | null>(null);
+  const scroller = useRef<HTMLDivElement>(null);
+  const [overflowing, setOverflowing] = useState(false);
+  useEffect(() => {
+    const el = scroller.current; if (!el) return;
+    const f = () => setOverflowing(el.scrollWidth - el.clientWidth - el.scrollLeft > 4);
+    f(); const ro = new ResizeObserver(f); ro.observe(el); el.addEventListener('scroll', f);
+    return () => { ro.disconnect(); el.removeEventListener('scroll', f); };
+  });
   if (!boot) return null;
   const cols = showCancelled ? [...COLUMNS, ['cancelled', 'Cancelled'] as [string, string]] : COLUMNS;
   return (
@@ -122,13 +138,13 @@ export function Board({ now }: { now: number }) {
         <button className="btn btn-primary btn-sm" onClick={() => open({ kind: 'newtask' })}><Icon as={Plus} size={14} />New task</button>
         <label className="text-callout text-fg-secondary inline-flex items-center gap-2 ml-auto"><input type="checkbox" className="checkbox" checked={showCancelled} onChange={(e) => setShowCancelled(e.target.checked)} /> Show cancelled</label>
       </div>
-      <div className="flex-1 min-h-0 overflow-x-auto flex gap-4 px-5 py-4 max-md:px-4 max-md:snap-x max-md:snap-mandatory">
+      <div ref={scroller} className={`flex-1 min-h-0 overflow-x-auto flex gap-3 px-5 py-4 max-md:px-4 max-md:snap-x max-md:snap-mandatory ${overflowing ? '[mask-image:linear-gradient(to_right,#000_calc(100%-24px),transparent)]' : ''}`}>
         {cols.map(([k, l]) => {
           let ts = boot.tasks.filter((t: any) => t.status === k);
           const total = ts.length;
           if (k === 'done' && !allDone) ts = ts.slice(-20);
           return (
-            <div key={k} data-board-col={k} className={`w-[272px] max-md:w-[85vw] max-md:snap-start shrink-0 flex flex-col gap-2 min-h-0 rounded-xl ${over === k ? 'bg-accent/[.06] ring-2 ring-accent/40' : ''}`}
+            <div key={k} data-board-col={k} className={`flex-1 basis-0 min-w-[208px] max-w-[320px] max-md:w-[85vw] max-md:flex-none max-md:snap-start flex flex-col gap-2 min-h-0 rounded-xl ${over === k ? 'bg-accent/[.06] ring-2 ring-accent/40' : ''}`}
               onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; }} onDragEnter={() => setOver(k)}
               onDragLeave={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setOver((o) => (o === k ? null : o)); }}
               onDrop={(e) => { e.preventDefault(); setOver(null); const id = parseDragId(e.dataTransfer); if (id) dropHandlers.get(id)?.(k); }}>
