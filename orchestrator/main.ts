@@ -72,8 +72,9 @@ function tick(): void {
       log(`claimed job ${job.id} (${job.agent_id} ${job.kind}${job.task_id ? ' T-' + job.task_id : ''}, attempt ${job.attempts})`);
       spawnJob(ctx, job, token);
     }
+    // PHASE2 §T5.1: per-agent budget.hit (daily dedup) + presence labels
     tx(db, () => { agentBudgetHits(db); refreshAllPresence(db); });
-    try { tx(db, () => peerHelpNotices(db)); } catch (e: any) { log('peer help notice error', e.message); }          // PHASE2 §T5.1: per-agent budget.hit (daily dedup) + presence labels
+    try { tx(db, () => peerHelpNotices(db)); } catch (e: any) { log('peer help notice error', e.message); }
     const why = budgetBlocked(db);
     if (why && now() - lastBudgetHit > 600_000 && db.prepare(`SELECT 1 FROM jobs WHERE status='queued'`).get()) {
       lastBudgetHit = now(); emit(db, 'budget.hit', 'system', 'budget', null, { reason: why }); refreshAllPresence(db);

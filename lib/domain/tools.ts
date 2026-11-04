@@ -118,7 +118,7 @@ export function callTool(db: DB, c: Caller, tool: string, input: any): ToolResul
       const again = db.prepare(`SELECT result FROM tool_calls WHERE job_id=? AND tool=? AND input_hash=? AND outcome='ok'`).get(c.jobId, tool, hash) as { result: string } | undefined;
       if (again) return JSON.parse(again.result);
       const res = dispatch(db, c, tool, input, pre);
-      db.prepare(`INSERT INTO tool_calls(job_id, agent_id, tool, input_hash, input, outcome, result, created_at) VALUES (?,?,?,?,?,?,?,?)${res.ok ? "" : " ON CONFLICT(job_id, tool, input_hash) DO NOTHING"}`)
+      db.prepare(`INSERT INTO tool_calls(job_id, agent_id, tool, input_hash, input, outcome, result, created_at) VALUES (?,?,?,?,?,?,?,?)${res.ok ? " ON CONFLICT(job_id, tool, input_hash) DO UPDATE SET outcome=excluded.outcome, result=excluded.result WHERE tool_calls.outcome='rejected'" : " ON CONFLICT(job_id, tool, input_hash) DO NOTHING"}`)
         .run(c.jobId, c.agent, tool, hash, JSON.stringify(input), res.ok ? 'ok' : 'rejected', JSON.stringify(res), now());
       emit(db, res.ok ? 'tool.called' : 'tool.rejected', c.agent, 'job', c.jobId, { tool, ...(res.ok ? {} : { error: (res as any).error }) }, c.jobId);
       return res;
@@ -221,14 +221,15 @@ function dispatch(db: DB, c: Caller, tool: string, input: any, pre: { cap?: Capt
     }
     case 'request_help': {
       const target: string | undefined = input.target_agent;
-      if ((db.prepare(`SELECT count(*) AS n FROM tool_calls WHERE job_id=? AND tool='request_help' AND outcome='ok'`).get(c.jobId) as any).n >= 1)
-        return rej('validation_error', 'one help request per run');
       // dispatch order (PHASE2 §T6): director+target -> validation_error; unknown id -> unknown_agent; peer from a non-work worker job -> not_allowed_for_role; guards
       if (c.role === 'director' && target !== undefined) return rej('validation_error', 'the director asks the user; omit target_agent');
       const peer = target !== undefined && target !== 'director';
       if (peer && !activeWorkerIds(db).includes(target!)) return rej('unknown_agent', `target_agent must be director or an active worker (${activeWorkerIds(db).join(', ')})`);
       if (peer && c.kind !== 'work') return rej('not_allowed_for_role', c.kind === 'help' ? 'peers can only escalate to the director' : 'only a work job can ask a peer');
-      const taskId = input.task_id ?? c.taskId;
+      if (c.role !== 'director' && (db.prepare(`SELECT count(*) AS n FROM tool_calls WHERE job_id=? AND tool='request_help' AND outcome='ok'`).get(c.jobId) as any).n >= 1)
+        return rej('validation_error', 'one help request per run');
+      if (c.role !== 'director' && input.task_id !== undefined && input.task_id !== c.taskId) return rej('wrong_task', 'use your own task');
+      const taskId = c.role === 'director' ? (input.task_id ?? c.taskId) : c.taskId;
       if (peer) {
         if (target === c.agent || !enabledWorkerIds(db).includes(target!)) return rej('unknown_agent', `${target} cannot be asked now; omit target_agent to ask the director`);
         if (!taskId) return rej('validation_error', 'peer help needs a task');

@@ -330,14 +330,14 @@ export function peerHelpJob(db: DB, t: Pick<TaskRow, 'id' | 'status' | 'blocked_
 }
 
 /** T11c: the task stops waiting on a peer that cannot answer and asks the director instead (one txn, the caller's). No help-end rule. */
-export function rerouteHelp(db: DB, t: TaskRow): void {
+export function rerouteHelp(db: DB, t: TaskRow, actor: 'user' | 'system' = 'system'): void {
   const pj = peerHelpJob(db, t);
   if (!pj) throw new DomainError('illegal_transition', 'this task is not waiting on a peer helper', 409);
   if (pj.status === 'running') throw new DomainError('help_running', `${pj.agent_id} is answering right now`, 409);
   const peer = pj.agent_id;
   const why = queueReason(db, peer) ?? 'not started';
   cancelQueued(db, 'id = ?', [pj.id], 'cancelled', 'system');
-  db.prepare(`UPDATE tasks SET help_agent_id='director', updated_at=?, version=version+1 WHERE id=?`).run(now(), t.id);
+  db.prepare(`UPDATE tasks SET help_agent_id='director', updated_by=?, updated_at=?, version=version+1 WHERE id=?`).run(actor, now(), t.id);
   emit(db, 'task.updated', 'system', 'task', t.id, { help_agent_id: 'director' });
   enqueueJob(db, { agent: 'director', kind: 'help', thread: t.thread_id, task: t.id, priority: PRIORITY.help });
   systemMessage(db, t.thread_id, `${peer} can't answer now (${why}); asking the director instead.`);

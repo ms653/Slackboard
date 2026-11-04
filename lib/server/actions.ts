@@ -57,7 +57,7 @@ export function taskAction(id: number, action: string, note?: string, assignee?:
       case 'reassign':
         if (typeof assignee !== 'string') throw new DomainError('validation_error', 'assignee is required', 400);
         reassignTask(d, t, assignee); return {};
-      case 'reroute_help': rerouteHelp(d, t); return {};
+      case 'reroute_help': rerouteHelp(d, t, 'user'); return {};
       case 'unblock': return { target: unblockTask(d, t, 'user', 'retry', ws!, note) };
       default: throw new DomainError('validation_error', `unknown action ${action}`, 400);
     }
