@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useStore } from './store';
 import { api } from './api';
 import { Composer } from './Composer';
-import { CircleCheck, CirclePause, CircleX, Clock, CornerDownRight, Flag, MessageSquare, Plus, TriangleAlert } from 'lucide-react';
+import { ChevronRight, CircleCheck, CirclePause, CircleX, Clock, CornerDownRight, Flag, MessageSquare, Plus, TriangleAlert } from 'lucide-react';
 import { ActionButton, Avatar, Dialog, DialogFooter, GlyphIcon, Icon, NoteDialog, Presence, Rich, RoleChip, STATUS_ICON, STATUS_ICON_CLS, TaskStatus, Time, usd } from './ui';
 import { retryToast } from './NeedsYou';
 import { AgentsSettings } from './AgentsSettings';
@@ -12,12 +12,35 @@ import { dropMove, parseDragId, TASK_MIME } from './dnd';
 /** Card drop handlers by task id; each TaskCard registers itself so the board can route a drop to the card's own dialogs. */
 const dropHandlers = new Map<number, (target: string) => void>();
 
+/** Runs of 3+ consecutive system task roots collapse behind one "N task threads" disclosure (DESIGN §4.12). */
+export function groupSystemRuns(roots: any[]): ({ kind: 'row'; th: any } | { kind: 'group'; ths: any[] })[] {
+  const out: ({ kind: 'row'; th: any } | { kind: 'group'; ths: any[] })[] = [];
+  let run: any[] = [];
+  const flush = () => { if (run.length >= 3) out.push({ kind: 'group', ths: run }); else run.forEach((th) => out.push({ kind: 'row', th })); run = []; };
+  for (const th of roots) {
+    if (th.first_author !== 'user' && !th.first_agent) run.push(th);
+    else { flush(); out.push({ kind: 'row', th }); }
+  }
+  flush();
+  return out;
+}
+
 export function Chat() {
   const { boot, open } = useStore();
   const endRef = useRef<HTMLDivElement>(null);
   const roots = (boot?.threads ?? []).slice().reverse();
+  const [openGroups, setOpenGroups] = useState<Set<number>>(new Set());
   useEffect(() => { endRef.current?.scrollIntoView({ block: 'end' }); }, [roots.length]);
   if (!boot) return null;
+  const systemLine = (th: any) => {
+    const tk = th.task_id ? boot.tasks.find((t: any) => t.id === th.task_id) : null;
+    return (
+      <li key={th.id} className="flex items-center gap-2 px-5 py-1 text-callout text-fg-tertiary">
+        <Icon as={tk ? STATUS_ICON(tk.status) : MessageSquare} size={14} className={tk ? STATUS_ICON_CLS(tk.status) : ''} />
+        <span className="min-w-0 truncate">{th.first_body ?? th.title}</span>
+        <button className="btn btn-link text-callout shrink-0" aria-label={`Open thread: ${th.first_body ?? th.title}`} onClick={() => open({ kind: 'thread', id: th.id })}>Open thread</button>
+      </li>);
+  };
   return (
     <section aria-labelledby="chat-h" className="h-full flex flex-col">
       <h2 id="chat-h" className="sr-only"># general</h2>
@@ -25,17 +48,24 @@ export function Chat() {
         {roots.length === 0 && <li className="mx-auto max-w-[320px] py-16 flex flex-col items-center text-center gap-2">
           <span className="h-12 w-12 rounded-full bg-fill-strong grid place-items-center text-fg-tertiary"><Icon as={MessageSquare} size={24} /></span>
           <span className="text-headline">Say what you need.</span> <span className="text-body text-fg-secondary">Mention @director to start.</span></li>}
-        {roots.map((th: any) => {
+        {groupSystemRuns(roots).map((it) => {
+          if (it.kind === 'group') {
+            const key = it.ths[0].id, isOpen = openGroups.has(key);
+            return (
+              <li key={`g${key}`} className="px-5 py-1">
+                <button type="button" className="btn btn-link text-callout text-fg-secondary" aria-expanded={isOpen}
+                  onClick={() => setOpenGroups((s) => { const n = new Set(s); n.has(key) ? n.delete(key) : n.add(key); return n; })}>
+                  <Icon as={ChevronRight} size={14} className={`transition-transform duration-fast ${isOpen ? 'rotate-90' : ''}`} />
+                  {it.ths.length} task threads
+                </button>
+                {isOpen && <ul className="mt-0.5 -mx-5">{it.ths.map((th: any) => systemLine(th))}</ul>}
+              </li>);
+          }
+          const th = it.th;
           const you = th.first_author === 'user';
           const who = you ? 'You' : th.first_agent ?? 'system';
           const chip = you ? '' : th.first_agent ? (th.first_agent === 'director' ? 'director' : 'worker') : 'system';
-          const tk = th.task_id ? boot.tasks.find((t: any) => t.id === th.task_id) : null;
-          if (!you && !th.first_agent) return (
-            <li key={th.id} className="flex items-center gap-2 px-5 py-1 text-callout text-fg-tertiary">
-              <Icon as={tk ? STATUS_ICON(tk.status) : MessageSquare} size={14} className={tk ? STATUS_ICON_CLS(tk.status) : ''} />
-              <span className="min-w-0 truncate">{th.first_body ?? th.title}</span>
-              <button className="btn btn-link text-callout shrink-0" aria-label={`Open thread: ${th.first_body ?? th.title}`} onClick={() => open({ kind: 'thread', id: th.id })}>Open thread</button>
-            </li>);
+          if (!you && !th.first_agent) return systemLine(th);
           return (
           <li key={th.id} className="group flex gap-3 px-5 py-1.5 hover:bg-fill/60 transition-colors duration-fast">
             <Avatar name={who} you={you} />
