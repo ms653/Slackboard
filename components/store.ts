@@ -12,7 +12,7 @@ export interface AgentFocus { agent: string; field: 'usd' | 'enabled' | 'row' }
 
 interface S {
   boot: any | null; loadError: string | null; view: View; panes: Pane[]; toasts: Toast[];
-  sse: 'live' | 'reconnecting' | 'offline'; sessionExpired: boolean; rev: number; killFailed: boolean;
+  sse: 'live' | 'reconnecting' | 'offline'; diffExpanded: boolean; sessionExpired: boolean; rev: number; killFailed: boolean;
   settingsAgentFocus: AgentFocus | null; settingsFocus: string | null; settingsPrefill: Record<string, number> | null; composerPrefill: string | null;
   setView(v: View): void; open(p: Pane): void; back(): void; close(): void; refresh(): Promise<void>;
   toast(text: string, tone?: Toast['tone'], actions?: Toast['actions']): void; openSettingsAgent(f: AgentFocus): void; dismiss(id: number): void; set(p: Partial<S>): void;
@@ -22,7 +22,7 @@ let toastId = 0;
 /** Element that had focus when the first pane opened; focus returns there on close (UX §9). Kept outside React state. */
 let opener: HTMLElement | null = null;
 export const useStore = create<S>((set, get) => ({
-  boot: null, loadError: null, view: 'chat', panes: [], toasts: [], sse: 'live', sessionExpired: false, rev: 0, killFailed: false,
+  boot: null, loadError: null, diffExpanded: false, view: 'chat', panes: [], toasts: [], sse: 'live', sessionExpired: false, rev: 0, killFailed: false,
   settingsFocus: null, settingsPrefill: null, composerPrefill: null, settingsAgentFocus: null,
   openSettingsAgent: (f) => set({ settingsAgentFocus: f, view: 'settings' }),
   setView: (view) => set({ view }),

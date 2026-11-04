@@ -70,7 +70,10 @@ function useKeys(setHelp: (b: boolean) => void, toggleSwitcher: () => void) {
     const onKey = (e: KeyboardEvent) => {
       const el = e.target as HTMLElement;
       const typing = el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT' || el.isContentEditable);
-      if (e.key === 'Escape' && !document.querySelector('[role="dialog"]')) { if (panes.length) close(); return; }
+      if (e.key === 'Escape' && !document.querySelector('[role="dialog"]')) {
+        if (el?.closest?.('[data-diff-composer]')) return;                       // the comment textarea cancels itself first (PHASE2 §B4)
+        if (useStore.getState().diffExpanded) { set({ diffExpanded: false }); return; }
+        if (panes.length) close(); return; }
       if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'k') { e.preventDefault(); toggleSwitcher(); return; }
       if (typing || e.ctrlKey || e.metaKey || e.altKey) return;
       if (e.key === 'g') { g.current = Date.now(); return; }
@@ -104,7 +107,7 @@ function useKeys(setHelp: (b: boolean) => void, toggleSwitcher: () => void) {
 }
 
 export default function App() {
-  const { boot, loadError, view, setView, panes, toasts, dismiss, refresh } = useStore();
+  const { boot, loadError, view, setView, panes, toasts, dismiss, refresh, diffExpanded } = useStore();
   const [now, setNow] = useState(Date.now());
   const [help, setHelp] = useState(false);
   const [switcher, setSwitcher] = useState(false);
@@ -159,7 +162,7 @@ export default function App() {
           </div>
         </main>
         {pane && (
-          <aside aria-label="Detail" className="w-[420px] max-w-full shrink-0 border-l border-slate-700 bg-slate-900 xl:static absolute inset-y-0 right-0 z-40 xl:z-auto">
+          <aside aria-label="Detail" className={`border-l border-slate-700 bg-slate-900 ${diffExpanded && pane.kind === 'review' ? 'absolute inset-y-0 right-0 left-0 xl:left-60 z-40 w-auto' : 'w-[420px] max-w-full shrink-0 xl:static absolute inset-y-0 right-0 z-40 xl:z-auto'}`}>
             <RightPane pane={pane} />
           </aside>)}
       </div>
@@ -176,7 +179,7 @@ export default function App() {
           <div className="bg-slate-800 rounded-lg p-5 text-sm" onClick={(e) => e.stopPropagation()}>
             <h2 id="help-h" className="font-semibold mb-2">Keyboard shortcuts</h2>
             <table><tbody>{[['g i / g c / g b / g s', 'Needs you / Chat / Board / Settings'], ['Ctrl/⌘+K', 'Quick switcher (channels, tasks, agents, New task)'], ['j / k', 'Next / previous item in the focused list'], ['h / l', 'Previous / next board column'], ['Drag', 'Board: drop a card on a column (legal moves only)'], ['/', 'Focus composer'], ['Enter', 'Open focused card'],
-              ['m', 'Move focused card (legal targets only)'], ['a / r', 'Approve or Accept / Reject or Reopen (focused inbox item or open review pane)'], ['d', 'View diff (focused board card or open task pane)'], ['Esc', 'Close pane or dialog'], ['Ctrl+Shift+K', 'Kill switch'], ['?', 'This help']].map(([k, d]) =>
+              ['m', 'Move focused card (legal targets only)'], ['a / r', 'Approve or Accept / Reject or Reopen (focused inbox item or open review pane)'], ['d', 'View diff (focused board card or open task pane)'], ['Diff: n / p', 'Next / previous hunk (Home / End: first / last; ] / [: next / previous file)'], ['Diff: ↑ ↓ ← →', 'Line up/down; old/new cell in side by side'], ['Diff: c', 'Comment on the focused line'], ['Diff: v / x', 'Unified or side by side / Expand or collapse the diff'], ['Diff: Esc', 'Cancel comment, then collapse, then close'], ['Esc', 'Close pane or dialog'], ['Ctrl+Shift+K', 'Kill switch'], ['?', 'This help']].map(([k, d]) =>
               <tr key={k}><td className="pr-4 font-mono">{k}</td><td>{d}</td></tr>)}</tbody></table>
             <button autoFocus className="btn bg-slate-700 mt-3" onClick={() => setHelp(false)}>Close</button>
           </div>

@@ -34,7 +34,8 @@ const job = (() => {
   const m = prompt.match(/<job id="(\d+)" kind="(\w+)" agent="(\w+)" attempt="(\d+)"(?: task="T-(\d+)")? thread="(\d+)"(?: review_round="(\d+)")?/);
   const role = (prompt.match(/<job [^>]*\brole="(\w+)"/) || [])[1] || (m && m[3] === 'director' ? 'director' : 'worker');
   const assignee = (prompt.match(/<task id="T-\d+"[^>]*\bassignee="(\w*)"/) || [])[1] || 'worker';
-  return m ? { id: +m[1], kind: m[2], agent: m[3], role, assignee, attempt: +m[4], task: m[5] ? +m[5] : null, thread: +m[6], round: m[7] ? +m[7] : 0 } : null;
+  const artifact = +((prompt.match(/<review_bundle[^>]*\bartifact="(\d+)"/) || [])[1] || 0);
+  return m ? { artifact, id: +m[1], kind: m[2], agent: m[3], role, assignee, attempt: +m[4], task: m[5] ? +m[5] : null, thread: +m[6], round: m[7] ? +m[7] : 0 } : null;
 })();
 if (job && job.kind === 'help' && job.role === 'worker' && /(^|[,\s])(Write|Edit)(\(|[,\s]|$)/.test(flag('--allowedTools') || '')) die('a worker help job must not allow Write/Edit');
 if (process.env.SB_FAKE_STATE && job) {                                                              // test hook: what this run was started with
@@ -81,7 +82,7 @@ function scriptSteps(j) {
   return null;
 }
 const subst = (v, j) => JSON.parse(JSON.stringify(v).replace(/"\{\{task_id\}\}"/g, String(j?.task ?? 0)).replace(/\{\{task_id\}\}/g, String(j?.task ?? 0))
-  .replace(/\{\{thread_id\}\}/g, String(j?.thread ?? 0)).replace(/\{\{attempt\}\}/g, String(j?.attempt ?? 0)).replace(/\{\{round\}\}/g, String((j?.round ?? 0) + 1)).replace(/\{\{asker\}\}/g, String(j?.assignee ?? 'worker')));
+  .replace(/\{\{thread_id\}\}/g, String(j?.thread ?? 0)).replace(/\{\{attempt\}\}/g, String(j?.attempt ?? 0)).replace(/\{\{round\}\}/g, String((j?.round ?? 0) + 1)).replace(/"\{\{artifact_id\}\}"/g, String(j?.artifact ?? 0)).replace(/\{\{asker\}\}/g, String(j?.assignee ?? 'worker')));
 
 (async () => {
   await rpc('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'fake-claude', version: '0' } });

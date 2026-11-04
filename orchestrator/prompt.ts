@@ -40,7 +40,7 @@ export function renderPrompt(db: DB, j: JobRow, reason: string | null): string {
       let diff = ''; try { diff = fs.readFileSync(a.diff_path, 'utf8'); } catch {}
       const files = (JSON.parse(a.files) as any[]).map((f) => `${f.path} (+${f.added} -${f.removed})`).join(', ');
       if (diff.length > 16 * 1024) diff = diff.slice(0, 16 * 1024) + `\n[diff truncated; files: ${files}]`;
-      parts.push(`<review_bundle round="${a.review_round}" base="${a.base_commit.slice(0, 8)}" head="${a.head_commit.slice(0, 8)}" files="${esc(files)}">\n  <untrusted kind="diff">${esc(diff)}</untrusted>\n</review_bundle>`);
+      parts.push(`<review_bundle artifact="${a.id}" round="${a.review_round}" base="${a.base_commit.slice(0, 8)}" head="${a.head_commit.slice(0, 8)}" files="${esc(files)}">\n  <untrusted kind="diff">${esc(diff)}</untrusted>\n</review_bundle>`);
     }
   }
   if (j.attempts > 1 && reason && !['no_handoff', 'max_turns'].includes(reason))

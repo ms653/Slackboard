@@ -5,6 +5,7 @@ import { api } from './api';
 import { Composer } from './Composer';
 import { ActionButton, Dialog, NoteDialog, TaskStatus, Time, usd } from './ui';
 import { retryToast } from './NeedsYou';
+import { DiffView, type Show } from './diff/DiffView';
 import { EDIT_BUDGET, budgetHitAgent, systemLineHasAction, reproposeDefault, notWokenReason, peerNotStartedAgent } from '../lib/systemLines';
 
 function useFetch<T>(url: string | null) {
@@ -19,7 +20,7 @@ function useFetch<T>(url: string | null) {
   return { data, err, load };
 }
 
-function PaneShell({ title, children, footer }: { title: React.ReactNode; children: React.ReactNode; footer?: React.ReactNode }) {
+function PaneShell({ title, children, footer, actions }: { title: React.ReactNode; children: React.ReactNode; footer?: React.ReactNode; actions?: React.ReactNode }) {
   const { back, close, panes } = useStore();
   const h = useRef<HTMLHeadingElement>(null);
   useEffect(() => { h.current?.focus(); }, []);
@@ -28,6 +29,7 @@ function PaneShell({ title, children, footer }: { title: React.ReactNode; childr
       <div className="flex items-center gap-2 p-3 border-b border-slate-700">
         {panes.length > 1 && <button className="btn bg-slate-700" onClick={back} aria-label="Back">←</button>}
         <h2 ref={h} tabIndex={-1} className="font-semibold flex-1 truncate outline-none">{title}</h2>
+        {actions}
         <button className="btn bg-slate-700" onClick={close} aria-label="Close pane (Esc)">✕</button>
       </div>
       <div className="flex-1 overflow-y-auto">{children}</div>
@@ -229,14 +231,22 @@ function TaskPane({ id }: { id: number }) {
 }
 
 function ReviewPane({ id }: { id: number }) {
-  const { data, err } = useFetch<any>(`/api/artifacts/${id}`);
-  const { boot, refresh, toast } = useStore();
+  const [show, setShow] = useState<Show>({ kind: 'round', id });
+  const curId = show.kind === 'round' ? show.id : show.to;
+  const { data, err, load } = useFetch<any>(`/api/artifacts/${curId}`);
+  const { boot, refresh, toast, diffExpanded: expanded, set } = useStore();
   const [dlg, setDlg] = useState<React.ReactNode>(null);
-  if (err) return <PaneShell title="Review"><p role="alert" className="p-4 text-rose-300">Couldn&apos;t load diff ({err}).</p></PaneShell>;
-  if (!data) return <PaneShell title="Review"><p className="p-4 text-slate-400">Loading diff…</p></PaneShell>;
+  const expandBtn = useRef<HTMLButtonElement>(null);
+  const first = useRef(true);
+  const toggle = useCallback(() => set({ diffExpanded: !useStore.getState().diffExpanded }), [set]);
+  useEffect(() => { if (first.current) { first.current = false; return; }
+    setTimeout(() => (expanded ? document.querySelector<HTMLElement>('aside[aria-label="Detail"] h2') : expandBtn.current)?.focus(), 0); }, [expanded]);
+  useEffect(() => () => { set({ diffExpanded: false }); }, [set]);
+  if (err && !data) return <PaneShell title="Review"><p role="alert" className="p-4 text-rose-300">Couldn&apos;t load diff ({err}). <button className="underline" onClick={() => load()}>Retry</button></p></PaneShell>;
+  if (!data) return <PaneShell title="Review"><p className="p-4 text-slate-400" aria-busy="true">Loading diff…</p></PaneShell>;
   const v = data.verdict;
   const verdict = v === 'approved' ? <><span aria-hidden>✓</span> Approved by {data.verdict_by}</>
-    : v === 'changes_requested' ? <><span aria-hidden>✕</span> Changes requested by {data.verdict_by}{data.review_round === 2 ? ' · Round 2 of 2 · review limit reached' : ''}</>
+    : v === 'changes_requested' ? <><span aria-hidden>↺</span> Changes requested by {data.verdict_by}{data.review_round === 2 ? ' · Round 2 of 2 · review limit reached' : ''}</>
     : v === 'superseded' ? <><span aria-hidden>⟲</span> Set aside: workspace changed before review; round redone</>
     : <><span aria-hidden>◐</span> Awaiting director review</>;
   const post = async (action: string, note?: string) => { const r = await api(`/api/tasks/${data.task_id}`, { body: { action, note } }); await refresh(); return r; };
@@ -248,18 +258,13 @@ function ReviewPane({ id }: { id: number }) {
     <ActionButton label="Send back with note" shortcut="r" run={async () => setDlg(<NoteDialog title="Send back" label="Note (required). Review rounds reset to 0 of 2." confirm="Send back" onClose={() => setDlg(null)} onDone={async (n) => toast(retryToast(await post('unblock', n), data.task_id))} />)} />
     <ActionButton label="Cancel task" kind="danger" run={async () => { await post('cancel'); }} /></>;
   return (
-    <PaneShell title={<>Review · T-{data.task_id} · round {data.review_round} of 2</>} footer={footer && <div className="p-3 border-t border-slate-700 flex gap-2">{footer}</div>}>
+    <PaneShell title={<>Review · T-{data.task_id} · round {data.review_round} of 2</>} footer={footer && <div className="p-3 border-t border-slate-700 flex gap-2">{footer}</div>}
+      actions={<button ref={expandBtn} className="btn bg-slate-700" aria-expanded={expanded} onClick={toggle}>{expanded ? '⤡ Collapse' : '⤢ Expand'} <kbd className="opacity-60 text-[10px] ml-1">x</kbd></button>}>
       <div className="p-3 text-sm space-y-2">
         <p>Verdict: {verdict} · <span className="text-slate-400">Captured by server <Time t={data.created_at} now={boot.now} /></span></p>
-        <p>Files ({data.files.length}): {data.files.map((f: any) => `${f.path} +${f.added} −${f.removed}`).join(', ') || 'none'}</p>
         {data.verdict_note && <p className="whitespace-pre-wrap">Reviewer notes: &ldquo;{data.verdict_note}&rdquo;</p>}
       </div>
-      <pre className="text-xs font-mono px-3 pb-3 overflow-x-auto" aria-label="Unified diff">{data.diff ? data.diff.split('\n').map((l: string, i: number) => {
-        const add = l.startsWith('+') && !l.startsWith('+++'), rem = l.startsWith('-') && !l.startsWith('---');
-        return <div key={i} className={add ? 'bg-emerald-950 text-emerald-200' : rem ? 'bg-rose-950 text-rose-200' : l.startsWith('@@') ? 'text-sky-300' : ''}>
-          {add && <span className="sr-only">added line </span>}{rem && <span className="sr-only">removed line </span>}{l || ' '}</div>;
-      }) : 'No diff content.'}</pre>
-      {data.truncated && <p className="px-3 pb-3 text-xs text-slate-400">Diff truncated at 2,000 lines.</p>}
+      <DiffView data={data} show={show} setShow={setShow} reload={() => load()} expanded={expanded} toggleExpand={toggle} />
       {dlg}
     </PaneShell>
   );
