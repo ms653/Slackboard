@@ -1,6 +1,6 @@
 # Slackboard Phase 2 design (delta)
 
-Status: Phase 2 Round 6 draft. This is a delta against the shipped MVP docs: `PRD.md`, `UX.md`, `TECH.md`. Anything not mentioned here is unchanged. Section refs like "TECH §5.3" point into those docs. Scope covers TECH §12 items 1–3 only.
+Status: Phase 2 Round 7 draft. This is a delta against the shipped MVP docs: `PRD.md`, `UX.md`, `TECH.md`. Anything not mentioned here is unchanged. Section refs like "TECH §5.3" point into those docs. Scope covers TECH §12 items 1–3 only.
 
 Code facts this delta builds on (read from the repo, not from the docs):
 - `'worker'` is hardcoded in `lib/domain/tools.ts` (`post_message` wake, mentions enum, `create_task` assignee enum), `tasks.ts` (`createTask` default, `unblockTask` presence), `rounds.ts` (`resumeTarget` fallback), `wake.ts` (`@(director|worker)` parse) and `prompts/worker.md`. Every one of these becomes "the task's assignee" or "an active worker id".
@@ -82,7 +82,7 @@ Fixtures: fresh DB. Budgets are $5/day est., 60 runs/day and 25 per 5 h. `max_co
 | Peer help waits behind the peer's own running work job (or a peer that can't run) | `queueReason` on the Blocked card; user action "Ask the director instead"; T11c auto-reroute after 10 min queued or when the peer becomes ineligible | P2-S10; §T9 State machine T11c |
 | A bad skill note on a spawned worker misroutes help or tasks | Skill note is user-approved (shown on the card, ≤ 500 chars, frozen by `approvals_immutable`), escaped in `<team>`, only a routing hint; user can disable or retire the worker | §T9 Prompt renderer `<team>`; P2-S5 |
 | `highlight.js` output via `dangerouslySetInnerHTML` (XSS) | The only raw-HTML sink is hljs output (escapes input); `splitHighlightedLines` only inserts `</span>`/`<span class=…>` copies of existing tags; plain render for unknown/huge files | §T9 Diff XSS fixture |
-| Migration 2 corrupts or rejects v1 data | Per-step txn; `test/migrations/validate_v2.py` must print `OK: migration 2 validated` (Round 5 executed green, §T1); vitest migration tests; validator green is a release-gate item | §T1 Validation; §T9 Migration, release gate |
+| Migration 2 corrupts or rejects v1 data | Per-step txn; `test/migrations/validate_v2.py` must print `OK: migration 2 validated` (Round 6 block executed green, §T1); vitest migration tests; validator green is a release-gate item | §T1 Validation; §T9 Migration, release gate |
 
 ---
 
@@ -287,7 +287,7 @@ Fixtures: fresh DB. Budgets are $5/day est., 60 runs/day and 25 per 5 h. `max_co
   - `agent_has_open_tasks`: "Finish or cancel these first:" then one task link per open task with only the actions that exist for it: "T-8 (reassign or cancel)" for a user-created task in To do or Blocked with reason ≠ `help` (Reassign is hidden for `blocked/help`, R1), "T-9 (cancel, then ask the director to re-propose)" for an agent-created top-level task, "T-10 (finish or cancel)" otherwise.
   - `agent_busy`: "writer2 is running; cancel its run or wait".
   - `last_worker`: "Keep at least one worker".
-- **Reassign** (task detail, UX §5.1 and the "Reassign [P2]" in UX §8): shown for To do and Blocked tasks that are not agent-created top-level tasks. It is a dropdown of active workers, excluding the task's `help_agent_id`. For an agent-created top-level task the detail shows instead "Proposed by the director; to move it, cancel and ask the director to re-propose." While the task is Blocked with reason `help`, Reassign is hidden and the detail shows "Waiting on <help_agent_id>; reroute help or reply first" (R1 `409 help_pending`).
+- **Reassign** (task detail, UX §5.1 and the "Reassign [P2]" in UX §8): shown for To do and Blocked tasks that are not agent-created top-level tasks. It is a dropdown of **enabled** active workers only (disabled workers are not listed), excluding the task's `help_agent_id`. For an agent-created top-level task the detail shows instead "Proposed by the director; to move it, cancel and ask the director to re-propose." While the task is Blocked with reason `help`, Reassign is hidden and the detail shows "Waiting on <help_agent_id>; reroute help or reply first" (R1 `409 help_pending`).
 - **Zero enabled workers:**
   - Disabling the last enabled worker in Settings first shows a confirm: "No worker will be enabled. New tasks can't be created and queued work waits until you enable one." [Disable] [Keep enabled].
   - New task form: the assignee dropdown is replaced by the visible text "No worker is enabled. [Enable]" and Create is disabled (`aria-disabled`, described by that text). [Enable] opens Settings → Agents (deep link below). Server backstop: `409 no_enabled_worker` (T1).
@@ -433,7 +433,7 @@ Notes:
 - Existing tasks all have assignee `worker`, which is an active worker, so the new triggers accept all v1 data.
 - v1 `blocked/help` tasks and help-failed `blocked/job_failed` tasks (TECH §3.1 `helpFailed` predicate, word for word: the task's newest finished job is a `help` job with status `failed`/`killed`/`cancelled`) are backfilled `help_agent_id = 'director'` (v1 help only went to the director), so B1 labels, T11b/T16, the help-end rule and J4 see a non-NULL helper. A `job_failed` task whose work/review failed (T10, never asked for help) stays NULL.
 
-**Validation:** `test/migrations/validate_v2.py` (in repo) loads `SCHEMA_SQL` from `lib/db/schema.ts`, seeds v1 data (incl. blocked `help`/`killed` tasks, a help-failed `job_failed` task, a work-failed `job_failed` task, and a work-failed `job_failed` task whose newest finished job is a *succeeded* help (task 14, stays NULL), and a `job_failed` task with an older failed help and a newer succeeded work job (task 15, stays NULL), with their finished jobs), applies this block (extracted from this file between the `MIGRATION 2` markers), then asserts each trigger, the `help_agent_id` backfill and the `tool_calls` row carry-over. Run: `python3 -I test/migrations/validate_v2.py /home/user/Slackboard`. Status: Round 5 executed green (`sqlite 3.53.1` / `OK: migration 2 validated`). Any later edit to it must be re-validated (release gate, §T9).
+**Validation:** `test/migrations/validate_v2.py` (in repo) loads `SCHEMA_SQL` from `lib/db/schema.ts`, seeds v1 data (incl. blocked `help`/`killed` tasks, a help-failed `job_failed` task, a work-failed `job_failed` task, and a work-failed `job_failed` task whose newest finished job is a *succeeded* help (task 14, stays NULL), and a `job_failed` task with an older failed help and a newer succeeded work job (task 15, stays NULL), with their finished jobs), applies this block (extracted from this file between the `MIGRATION 2` markers), then asserts each trigger, the `help_agent_id` backfill and the `tool_calls` row carry-over. Run: `python3 -I test/migrations/validate_v2.py /home/user/Slackboard`. Status: Round 6 block executed green (`sqlite 3.53.1` / `OK: migration 2 validated`). Any later edit to it must be re-validated (release gate, §T9).
 
 ## T2. Agent lifecycle (new table; actor in brackets)
 
@@ -554,7 +554,8 @@ if (c.rule === 'J5+T11' && task) {
   enqueueJob(db, { agent: target, kind: 'help', thread: task.thread_id, task: task.id, priority: PRIORITY.help });
 }
 if (j.kind === 'help' && role(j.agent_id) === 'worker' && c.rule === 'J5'
-    && task?.status === 'blocked' && task.blocked_reason === 'help' && hasToolCall(db, j.id, 'request_help')) {   // T11b
+    && task?.status === 'blocked' && task.blocked_reason === 'help' && hasToolCall(db, j.id, 'request_help')) {   // hasToolCall counts outcome='ok' rows only (as in lib/domain/finish.ts)
+        // T11b
   db.prepare(`UPDATE tasks SET help_agent_id='director', updated_at=?, version=version+1 WHERE id=?`).run(now(), task.id);
   enqueueJob(db, { agent: 'director', kind: 'help', thread: task.thread_id, task: task.id, priority: PRIORITY.help });
 }
@@ -588,7 +589,7 @@ These need no logic change. `killAll` already covers every child, `procTargets` 
 
 ## T6. Tool schemas (TECH §8 delta)
 
-Enums marked *generated* are built per job in `/tools` (the shim fetches them once per run, TECH §8 transport) from `SELECT id FROM agents WHERE role='worker' AND enabled=1 AND retired_at IS NULL`, and **re-checked at call time**. `validate()` gains `pattern`, `minimum` and `maximum`.
+Enums marked *generated* are built per job in `/tools` (the shim fetches them once per run, TECH §8 transport) from `SELECT id FROM agents WHERE role='worker' AND enabled=1 AND retired_at IS NULL`, and **re-checked at call time**. `validate()` gains `pattern`, `minimum` and `maximum`, and always checks a **static base schema** in which every generated-enum field (`create_task.assignee`, `request_help.target_agent`, `post_message.mentions.items`) is plain `{"type":"string"}`; the generated enums in `/tools` are published to the model only. Membership is checked in `dispatch`, in this order: `create_task`: `no_enabled_worker` → `unknown_assignee`; `request_help`: `unknown_agent` → `not_allowed_for_role`. So with zero enabled workers `create_task {assignee:'worker'}` returns `no_enabled_worker` (not `validation_error`), and a spawned `writer2` passes `validate()`. A run whose cached `/tools` omitted `assignee` (no worker enabled at run start) may still omit it; the fewest-open-tasks default (§T6.2) applies.
 
 ### T6.1 `spawn_worker` (new; director `respond` jobs only)
 ```json
@@ -734,6 +735,7 @@ Event `help.requested {routed_to, task_id, options, peer}`. Returns `{ok, messag
   - (v) peer help job with `help_agent_id` ≠ its agent is not claimed and is cancelled by J4;
   - (vi) the 1,000-race test from TECH §11 rerun with 3 workers never shows two running jobs per agent.
 - **Tools:**
+  - generated enums vs `validate()`: with zero enabled workers, `create_task {assignee:'worker'}` → `no_enabled_worker` (not `validation_error`); with `writer2` active, `create_task {assignee:'writer2'}` passes `validate()` and `dispatch`; an unknown name → `unknown_assignee`; `request_help {target_agent:'nobody'}` → `unknown_agent`;
   - `spawn_worker`: auth matrix (worker, director `review`/`help` → `not_allowed_for_role`), guards in order, replay idempotent (same input → same approval id);
   - `request_approval {kind:'spend', payload:{action:'spawn_worker', …}}` → `validation_error`, no approval row;
   - `create_task` enum generated in `/tools`, `unknown_assignee` after retire, fewest-open default;
