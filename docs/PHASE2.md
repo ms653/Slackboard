@@ -1,6 +1,6 @@
 # Slackboard Phase 2 design (delta)
 
-Status: Phase 2 Round 7 draft. This is a delta against the shipped MVP docs: `PRD.md`, `UX.md`, `TECH.md`. Anything not mentioned here is unchanged. Section refs like "TECH §5.3" point into those docs. Scope covers TECH §12 items 1–3 only.
+Status: Phase 2 Round 8 draft. This is a delta against the shipped MVP docs: `PRD.md`, `UX.md`, `TECH.md`. Anything not mentioned here is unchanged. Section refs like "TECH §5.3" point into those docs. Scope covers TECH §12 items 1–3 only.
 
 Code facts this delta builds on (read from the repo, not from the docs):
 - `'worker'` is hardcoded in `lib/domain/tools.ts` (`post_message` wake, mentions enum, `create_task` assignee enum), `tasks.ts` (`createTask` default, `unblockTask` presence), `rounds.ts` (`resumeTarget` fallback), `wake.ts` (`@(director|worker)` parse) and `prompts/worker.md`. Every one of these becomes "the task's assignee" or "an active worker id".
@@ -82,7 +82,7 @@ Fixtures: fresh DB. Budgets are $5/day est., 60 runs/day and 25 per 5 h. `max_co
 | Peer help waits behind the peer's own running work job (or a peer that can't run) | `queueReason` on the Blocked card; user action "Ask the director instead"; T11c auto-reroute after 10 min queued or when the peer becomes ineligible | P2-S10; §T9 State machine T11c |
 | A bad skill note on a spawned worker misroutes help or tasks | Skill note is user-approved (shown on the card, ≤ 500 chars, frozen by `approvals_immutable`), escaped in `<team>`, only a routing hint; user can disable or retire the worker | §T9 Prompt renderer `<team>`; P2-S5 |
 | `highlight.js` output via `dangerouslySetInnerHTML` (XSS) | The only raw-HTML sink is hljs output (escapes input); `splitHighlightedLines` only inserts `</span>`/`<span class=…>` copies of existing tags; plain render for unknown/huge files | §T9 Diff XSS fixture |
-| Migration 2 corrupts or rejects v1 data | Per-step txn; `test/migrations/validate_v2.py` must print `OK: migration 2 validated` (Round 6 block executed green, §T1); vitest migration tests; validator green is a release-gate item | §T1 Validation; §T9 Migration, release gate |
+| Migration 2 corrupts or rejects v1 data | Per-step txn; `test/migrations/validate_v2.py` must print `OK: migration 2 validated` (Round 6 block executed green (the MIGRATION 2 block is unchanged since Round 6), §T1); vitest migration tests; validator green is a release-gate item | §T1 Validation; §T9 Migration, release gate |
 
 ---
 
@@ -460,7 +460,7 @@ On A2, if the guard fails, the txn rolls back and the approval stays `pending` (
 | T11b (new) | blocked (`help`) | peer `help` job ends J5 after an ok `request_help` (escalation) | blocked (`help`) | caller is `help_agent_id` | `help_agent_id = 'director'`; enqueue director `help`; event `task.updated {help_agent_id}` |
 | T11c (new) | blocked (`help`), `help_agent_id` = a peer whose `help` job is still `queued` | user `reroute_help` (`POST /api/tasks/:id {action:'reroute_help'}`); or sweep (`rerouteStalePeerHelp`, same tick as approval expiry) when the job has been queued ≥ 10 min (`now − jobs.created_at ≥ 600 000 ms` on the peer `help` job) or the peer is disabled (retire is A6) | blocked (`help`) | kill not engaged (sweep only); peer job not `running` (else `409 help_running`) | in one txn: `help_agent_id = 'director'`; cancel the peer's queued `help` job (`failure_kind='cancelled'`, no help-end: the task no longer waits on that agent); enqueue director `help` (priority 60); system line "<peer> can't answer now (<queueReason>); asking the director instead."; `task.updated {help_agent_id}` |
 | T16 | blocked | as MVP; plus peer `post_message {wake:true}` mentioning the assignee by the task's `help_agent_id` (reason `help` only) | `resumeTarget` | director or the current helper may trigger T16 only for reason `help` | as MVP. When leaving `blocked`: `help_agent_id = NULL` and cancel queued `help` jobs of the task (`failure_kind='cancelled'`; help-end rule does not fire because the task is no longer `blocked/help`). Case 0 (Retry after help failed) sets `help_agent_id = 'director'`: **a failed peer help is never retried on the peer** |
-| R1 (new, not a status move) | todo, blocked (reason ≠ `help`) | Reassign (user, `POST /api/tasks/:id {action:'reassign', assignee}`) | same | not an agent-created top-level task (trigger `tasks_agent_toplevel_immutable`); target is an active worker (trigger); task not `blocked/help` (else `409 help_pending`, hint "Waiting on <help_agent_id>; reroute help or reply first": the helper's wake targets the current assignee, §T6.3); target ≠ the task's `help_agent_id` (else `409 assignee_is_helper`) | cancel queued jobs of the old assignee for the task; if `todo`, enqueue `work` for the new one; `task.updated {assignee}` |
+| R1 (new, not a status move) | todo, blocked (reason ≠ `help`) | Reassign (user, `POST /api/tasks/:id {action:'reassign', assignee}`) | same | not an agent-created top-level task (trigger `tasks_agent_toplevel_immutable`); target is an active worker (trigger) and enabled (domain check, else `409 assignee_disabled`); task not `blocked/help` (else `409 help_pending`, hint "Waiting on <help_agent_id>; reroute help or reply first": the helper's wake targets the current assignee, §T6.3); target ≠ the task's `help_agent_id` (else `409 assignee_is_helper`) | cancel queued jobs of the old assignee for the task; if `todo`, enqueue `work` for the new one; `task.updated {assignee}` |
 
 `setStatus` adds `help_agent_id = NULL` whenever `to !== 'blocked'`. Trigger `tasks_help_agent_scope` is the backstop.
 
@@ -554,8 +554,7 @@ if (c.rule === 'J5+T11' && task) {
   enqueueJob(db, { agent: target, kind: 'help', thread: task.thread_id, task: task.id, priority: PRIORITY.help });
 }
 if (j.kind === 'help' && role(j.agent_id) === 'worker' && c.rule === 'J5'
-    && task?.status === 'blocked' && task.blocked_reason === 'help' && hasToolCall(db, j.id, 'request_help')) {   // hasToolCall counts outcome='ok' rows only (as in lib/domain/finish.ts)
-        // T11b
+    && task?.status === 'blocked' && task.blocked_reason === 'help' && hasToolCall(db, j.id, 'request_help')) {   // T11b; hasToolCall counts outcome='ok' rows only (lib/domain/finish.ts)
   db.prepare(`UPDATE tasks SET help_agent_id='director', updated_at=?, version=version+1 WHERE id=?`).run(now(), task.id);
   enqueueJob(db, { agent: 'director', kind: 'help', thread: task.thread_id, task: task.id, priority: PRIORITY.help });
 }
@@ -589,7 +588,11 @@ These need no logic change. `killAll` already covers every child, `procTargets` 
 
 ## T6. Tool schemas (TECH §8 delta)
 
-Enums marked *generated* are built per job in `/tools` (the shim fetches them once per run, TECH §8 transport) from `SELECT id FROM agents WHERE role='worker' AND enabled=1 AND retired_at IS NULL`, and **re-checked at call time**. `validate()` gains `pattern`, `minimum` and `maximum`, and always checks a **static base schema** in which every generated-enum field (`create_task.assignee`, `request_help.target_agent`, `post_message.mentions.items`) is plain `{"type":"string"}`; the generated enums in `/tools` are published to the model only. Membership is checked in `dispatch`, in this order: `create_task`: `no_enabled_worker` → `unknown_assignee`; `request_help`: `unknown_agent` → `not_allowed_for_role`. So with zero enabled workers `create_task {assignee:'worker'}` returns `no_enabled_worker` (not `validation_error`), and a spawned `writer2` passes `validate()`. A run whose cached `/tools` omitted `assignee` (no worker enabled at run start) may still omit it; the fewest-open-tasks default (§T6.2) applies.
+Enums marked *generated* are built per job in `/tools` (the shim fetches them once per run, TECH §8 transport) from `SELECT id FROM agents WHERE role='worker' AND enabled=1 AND retired_at IS NULL`, and **re-checked at call time**. `validate()` gains `pattern`, `minimum` and `maximum`, and always checks a **static base schema** in which every generated-enum field (`create_task.assignee`, `request_help.target_agent`, `post_message.mentions.items`) is plain `{"type":"string"}`; the generated enums in `/tools` are published to the model only. Membership is checked in `dispatch`; the complete order per tool (first failing check wins) is:
+  - `create_task`: per-job limit (at most 3 calls, `validation_error`) → `no_enabled_worker` → `assignee` not an **active and enabled** worker → `unknown_assignee`.
+  - `request_help`: caller is the director and `target_agent` is present → `validation_error` (§T6.5 table) → `target_agent` not `director` and not an active worker id → `unknown_agent` → caller is a worker job other than `work` (e.g. `respond`) with a peer `target_agent` → `not_allowed_for_role` → the §T6.5 guards.
+  - `post_message`: every `mentions` item ∈ {`user`, `director`, active worker ids}, else `unknown_agent` (hint lists the valid ids; a retired worker is not valid) → `cannot_address_user` → the `wake` checks (`wrong_agent` / `validation_error`).
+  So with zero enabled workers `create_task {assignee:'worker'}` returns `no_enabled_worker` (not `validation_error`), and a spawned `writer2` passes `validate()`. A run whose cached `/tools` omitted `assignee` (no worker enabled at run start) may still omit it; the fewest-open-tasks default (§T6.2) applies.
 
 ### T6.1 `spawn_worker` (new; director `respond` jobs only)
 ```json
@@ -735,7 +738,8 @@ Event `help.requested {routed_to, task_id, options, peer}`. Returns `{ok, messag
   - (v) peer help job with `help_agent_id` ≠ its agent is not claimed and is cancelled by J4;
   - (vi) the 1,000-race test from TECH §11 rerun with 3 workers never shows two running jobs per agent.
 - **Tools:**
-  - generated enums vs `validate()`: with zero enabled workers, `create_task {assignee:'worker'}` → `no_enabled_worker` (not `validation_error`); with `writer2` active, `create_task {assignee:'writer2'}` passes `validate()` and `dispatch`; an unknown name → `unknown_assignee`; `request_help {target_agent:'nobody'}` → `unknown_agent`;
+  - generated enums vs `validate()`: with zero enabled workers, `create_task {assignee:'worker'}` → `no_enabled_worker` (not `validation_error`); with `writer2` active and enabled, `create_task {assignee:'writer2'}` passes `validate()` and `dispatch`; an unknown or disabled name → `unknown_assignee`; worker `work` job `request_help {target_agent:'nobody'}` → `unknown_agent`; director `request_help {target_agent:'worker'}` → `validation_error`; worker `respond` job `request_help {target_agent:'writer2'}` → `not_allowed_for_role`; `post_message {mentions:['nobody']}` and a mention of a retired worker → `unknown_agent`;
+  - R1 reassign to a disabled worker → `409 assignee_disabled` (the UI lists enabled workers only);
   - `spawn_worker`: auth matrix (worker, director `review`/`help` → `not_allowed_for_role`), guards in order, replay idempotent (same input → same approval id);
   - `request_approval {kind:'spend', payload:{action:'spawn_worker', …}}` → `validation_error`, no approval row;
   - `create_task` enum generated in `/tools`, `unknown_assignee` after retire, fewest-open default;
