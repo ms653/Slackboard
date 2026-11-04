@@ -1,6 +1,6 @@
 # Slackboard Phase 2 design (delta)
 
-Status: Phase 2 Round 5 draft. This is a delta against the shipped MVP docs: `PRD.md`, `UX.md`, `TECH.md`. Anything not mentioned here is unchanged. Section refs like "TECH §5.3" point into those docs. Scope covers TECH §12 items 1–3 only.
+Status: Phase 2 Round 6 draft. This is a delta against the shipped MVP docs: `PRD.md`, `UX.md`, `TECH.md`. Anything not mentioned here is unchanged. Section refs like "TECH §5.3" point into those docs. Scope covers TECH §12 items 1–3 only.
 
 Code facts this delta builds on (read from the repo, not from the docs):
 - `'worker'` is hardcoded in `lib/domain/tools.ts` (`post_message` wake, mentions enum, `create_task` assignee enum), `tasks.ts` (`createTask` default, `unblockTask` presence), `rounds.ts` (`resumeTarget` fallback), `wake.ts` (`@(director|worker)` parse) and `prompts/worker.md`. Every one of these becomes "the task's assignee" or "an active worker id".
@@ -82,7 +82,7 @@ Fixtures: fresh DB. Budgets are $5/day est., 60 runs/day and 25 per 5 h. `max_co
 | Peer help waits behind the peer's own running work job (or a peer that can't run) | `queueReason` on the Blocked card; user action "Ask the director instead"; T11c auto-reroute after 10 min queued or when the peer becomes ineligible | P2-S10; §T9 State machine T11c |
 | A bad skill note on a spawned worker misroutes help or tasks | Skill note is user-approved (shown on the card, ≤ 500 chars, frozen by `approvals_immutable`), escaped in `<team>`, only a routing hint; user can disable or retire the worker | §T9 Prompt renderer `<team>`; P2-S5 |
 | `highlight.js` output via `dangerouslySetInnerHTML` (XSS) | The only raw-HTML sink is hljs output (escapes input); `splitHighlightedLines` only inserts `</span>`/`<span class=…>` copies of existing tags; plain render for unknown/huge files | §T9 Diff XSS fixture |
-| Migration 2 corrupts or rejects v1 data | Per-step txn; `test/migrations/validate_v2.py` must print `OK: migration 2 validated` (Round 4 executed green, §T1); vitest migration tests; validator green is a release-gate item | §T1 Validation; §T9 Migration, release gate |
+| Migration 2 corrupts or rejects v1 data | Per-step txn; `test/migrations/validate_v2.py` must print `OK: migration 2 validated` (Round 5 executed green, §T1); vitest migration tests; validator green is a release-gate item | §T1 Validation; §T9 Migration, release gate |
 
 ---
 
@@ -234,7 +234,7 @@ Fixtures: fresh DB. Budgets are $5/day est., 60 runs/day and 25 per 5 h. `max_co
   - "Will be sent with the worker's next run" (not yet in any worker `work` run and the artifact is still the task's latest);
   - "Sent to worker run #n" (its id is in that job's `job.started.review_note_ids`);
   - "Not sent: round closed" (the task reached `done`/`cancelled`, or a newer artifact exists, before any worker run included it).
-  - User adds a comment with [+ Comment] or `c` on a focused line. Side: in unified view `c` anchors `side='old'` on a `−` line and `'new'` on `+` and context lines; in side by side it anchors to the focused cell's side (`←`/`→`, §B5). That opens an inline textarea (≤ 4000 chars), Save/Cancel, `Ctrl+Enter` saves, `Esc` cancels and returns focus to the line.
+  - User adds a comment with [+ Comment] or `c` on a focused line. Side: in unified view `c` anchors `side='old'` on a `−` line and `'new'` on `+` and context lines; in side by side it anchors to the focused cell's side (`←`/`→`, §B5), except that the old cell of a context row (focusable for reading) anchors `side='new'`, and its textarea label says so (§B5). Context lines are never anchored `side='old'` (§T6.4). That opens an inline textarea (≤ 4000 chars), Save/Cancel, `Ctrl+Enter` saves, `Esc` cancels and returns focus to the line.
   - [+ Comment] appears only on the task's **latest** artifact while the task is `in_review`, `blocked` or `todo` (delivery guaranteed: the next worker run renders it, §T4.3). While the worker's `work` job runs (`in_progress`) it is disabled with "Worker is running; comment after it submits". On older rounds and `done`/`cancelled` tasks it is hidden and the toolbar says "Comments closed for this round". Comments do not wake anyone. The director also sees them on its next `review` run of that artifact.
 - **Highlighting:** applied by file extension. Files with > 1,000 diff lines, unknown extensions and the compare view's renamed files render plain. Colour is never the only signal (prefix and screen-reader text, below).
 - **States:**
@@ -260,7 +260,7 @@ Fixtures: fresh DB. Budgets are $5/day est., 60 runs/day and 25 per 5 h. `max_co
 | `]` / `[` | next / previous file (focus goes to the file heading) |
 | `↑` / `↓` | previous / next line inside the focused hunk (roving `tabindex`; `Tab` leaves the diff); in side by side focus stays on the same side |
 | `←` / `→` | side by side only: move focus between the old and new cell of the row; an empty padded cell is skipped and the polite region says "no line on this side" |
-| `c` | comment on the focused line (user): unified `−` line → `side='old'`, `+`/context → `'new'`; side by side → the focused cell's side |
+| `c` | comment on the focused line (user): unified `−` line → `side='old'`, `+`/context → `'new'`; side by side → the focused cell's side, except a context row's old cell → `'new'` (context lines are only ever `'new'`, §T6.4) |
 | `v` | toggle unified / side by side (no-op with the announced reason when too narrow) |
 | `x` | expand / collapse the review view (focus: review heading / Expand button) |
 | `Esc` | collapse when expanded and no textarea is open (otherwise UX §10 close rules) |
@@ -268,7 +268,7 @@ Fixtures: fresh DB. Budgets are $5/day est., 60 runs/day and 25 per 5 h. `max_co
 
 - Structure: each file is a `region` with an `h3`. Each hunk is a `group` with an `h4`, "Hunk k of N, lines a to b". Lines are rows of a `table` with `aria-rowcount`. Side by side uses two cells per row with column headers "old" and "new".
 - Every line's accessible text starts with the visually hidden prefix "added line 12:", "removed line 8:" or "unchanged line 10:". In side by side the cell names are "old line 8, removed" and "new line 12, added". The `+`/`−` glyphs stay in the DOM (UX §11).
-- Comments are `role="note"` with name "Comment by <author> on <side> line <n>" (e.g. "Comment by director on old line 8"). The comment textarea label states the side and line: "Comment on old line 8 of docs/INSTALL.md" / "Comment on new line 12 of docs/INSTALL.md".
+- Comments are `role="note"` with name "Comment by <author> on <side> line <n>" (e.g. "Comment by director on old line 8"). The comment textarea label states the side and line: "Comment on old line 8 of docs/INSTALL.md" / "Comment on new line 12 of docs/INSTALL.md". From a context row's old cell: "Comment on new line 12 of docs/INSTALL.md (unchanged line; comments on unchanged lines attach to the new side)".
 - Agents list keys (`j`/`k`, Tab order, announcements): §B1.
 - Highlight spans carry no semantics. Tokens use AA-contrast colours on both added and removed backgrounds, and the theme is tested by axe.
 
@@ -284,10 +284,14 @@ Fixtures: fresh DB. Budgets are $5/day est., 60 runs/day and 25 per 5 h. `max_co
 | ▸ Retired (1): tester (retired 09:40)                                                |
 ```
 - **Retire** opens a confirm: "Retire writer2? This is permanent; the name can't be reused." Server errors are shown inline:
-  - `agent_has_open_tasks`: "Finish or cancel these first:" then one task link per open task with only the actions that exist for it: "T-8 (reassign or cancel)" for a user-created task in To do/Blocked, "T-9 (cancel, then ask the director to re-propose)" for an agent-created top-level task, "T-10 (finish or cancel)" otherwise.
+  - `agent_has_open_tasks`: "Finish or cancel these first:" then one task link per open task with only the actions that exist for it: "T-8 (reassign or cancel)" for a user-created task in To do or Blocked with reason ≠ `help` (Reassign is hidden for `blocked/help`, R1), "T-9 (cancel, then ask the director to re-propose)" for an agent-created top-level task, "T-10 (finish or cancel)" otherwise.
   - `agent_busy`: "writer2 is running; cancel its run or wait".
   - `last_worker`: "Keep at least one worker".
 - **Reassign** (task detail, UX §5.1 and the "Reassign [P2]" in UX §8): shown for To do and Blocked tasks that are not agent-created top-level tasks. It is a dropdown of active workers, excluding the task's `help_agent_id`. For an agent-created top-level task the detail shows instead "Proposed by the director; to move it, cancel and ask the director to re-propose." While the task is Blocked with reason `help`, Reassign is hidden and the detail shows "Waiting on <help_agent_id>; reroute help or reply first" (R1 `409 help_pending`).
+- **Zero enabled workers:**
+  - Disabling the last enabled worker in Settings first shows a confirm: "No worker will be enabled. New tasks can't be created and queued work waits until you enable one." [Disable] [Keep enabled].
+  - New task form: the assignee dropdown is replaced by the visible text "No worker is enabled. [Enable]" and Create is disabled (`aria-disabled`, described by that text). [Enable] opens Settings → Agents (deep link below). Server backstop: `409 no_enabled_worker` (T1).
+  - Reassign dropdown: when no worker is enabled, it shows the same text and [Enable] instead of options.
 - **Retired assignee:** on a task whose assignee is retired, Reopen, Retry and Reply-to-unblock show inline (no state change) "<agent> is retired. Create a new task or ask the director to re-propose." (`409 assignee_retired`, §T3.1).
 - **Cancel task** confirm (UX §5.1) for an agent-created top-level task adds [Cancel and ask the director to re-propose to ▾<worker>]. It cancels the task (MVP path), then opens #general with the composer prefilled `@director Re-propose T-9 "<title>" assigned to <worker>.` Nothing is sent until the user presses Enter.
 - **Deep links:** [Edit budget] and [Enable] from the agents list or task detail (§B1) open this section scrolled to that agent with the `$/day` input or the Enabled checkbox focused (for a worker with no own budget, [Set budget] opens with `$/day` focused).
@@ -355,6 +359,7 @@ END;
 -- ── tasks: assignee must be an active worker; who is answering a help request ──
 ALTER TABLE tasks ADD COLUMN help_agent_id TEXT REFERENCES agents(id);
 -- v1 help always went to the director. job_failed only when help failed (TECH §3.1 helpFailed: the newest finished job is a help job with status failed/killed/cancelled).
+-- A task with no finished jobs: the subquery is NULL, NULL = 1 is not true, so the row is skipped (stays NULL).
 UPDATE tasks SET help_agent_id='director' WHERE status='blocked' AND (blocked_reason='help' OR (blocked_reason='job_failed' AND (SELECT kind='help' AND status IN ('failed','killed','cancelled') FROM jobs WHERE task_id=tasks.id AND finished_at IS NOT NULL ORDER BY id DESC LIMIT 1) = 1));
 
 CREATE TRIGGER tasks_assignee_active_ins BEFORE INSERT ON tasks
@@ -428,7 +433,7 @@ Notes:
 - Existing tasks all have assignee `worker`, which is an active worker, so the new triggers accept all v1 data.
 - v1 `blocked/help` tasks and help-failed `blocked/job_failed` tasks (TECH §3.1 `helpFailed` predicate, word for word: the task's newest finished job is a `help` job with status `failed`/`killed`/`cancelled`) are backfilled `help_agent_id = 'director'` (v1 help only went to the director), so B1 labels, T11b/T16, the help-end rule and J4 see a non-NULL helper. A `job_failed` task whose work/review failed (T10, never asked for help) stays NULL.
 
-**Validation:** `test/migrations/validate_v2.py` (in repo) loads `SCHEMA_SQL` from `lib/db/schema.ts`, seeds v1 data (incl. blocked `help`/`killed` tasks, a help-failed `job_failed` task, a work-failed `job_failed` task, and a work-failed `job_failed` task whose newest finished job is a *succeeded* help (task 14, stays NULL), with their finished jobs), applies this block (extracted from this file between the `MIGRATION 2` markers), then asserts each trigger, the `help_agent_id` backfill and the `tool_calls` row carry-over. Run: `python3 -I test/migrations/validate_v2.py /home/user/Slackboard`. Status: Round 4 block and fixtures executed green (`sqlite 3.53.1` / `OK: migration 2 validated`). Any later edit to it must be re-validated (release gate, §T9).
+**Validation:** `test/migrations/validate_v2.py` (in repo) loads `SCHEMA_SQL` from `lib/db/schema.ts`, seeds v1 data (incl. blocked `help`/`killed` tasks, a help-failed `job_failed` task, a work-failed `job_failed` task, and a work-failed `job_failed` task whose newest finished job is a *succeeded* help (task 14, stays NULL), and a `job_failed` task with an older failed help and a newer succeeded work job (task 15, stays NULL), with their finished jobs), applies this block (extracted from this file between the `MIGRATION 2` markers), then asserts each trigger, the `help_agent_id` backfill and the `tool_calls` row carry-over. Run: `python3 -I test/migrations/validate_v2.py /home/user/Slackboard`. Status: Round 5 executed green (`sqlite 3.53.1` / `OK: migration 2 validated`). Any later edit to it must be re-validated (release gate, §T9).
 
 ## T2. Agent lifecycle (new table; actor in brackets)
 
@@ -438,7 +443,7 @@ Notes:
 | A2 | approval `pending` | Approve (user, `POST /api/approvals/:id/decide`) | agent active, `enabled = 1` | stored payload passes the §T6.1 `spawn_worker` schema and bounds again (`model = 'sonnet'`, name pattern/reserved, `daily_usd` 1.0–3.0, `daily_jobs` 1–20), else `400 invalid_payload`; name free; active workers < 3 (trigger); kill state irrelevant | approval `pending→approved`. `INSERT agents` (`id` = `display_name` = payload name, `created_at` = now, role worker, `sonnet`, max_turns 15, max_budget_usd 1.00, `allowed_tools` = MVP worker set, `skill_note`, `spawn_approval_id`). `INSERT budgets(scope='agent', agent_id, period='day', limit_usd=daily_usd, limit_jobs=daily_jobs)`. Approval `approved→consumed` (`consumed_at`). If `raise_concurrency_to`, set `system_state.max_concurrency` (validated 1–4, ≥ current). Events `approval.decided`, `approval.consumed`, `settings.changed {agent_created}`. Enqueue a director `respond` job in that thread (normal respond priority) so it assigns work, only if the thread is open and under its caps (TECH §3.3); else no job and no later automatic wake (raise cap / reopen do not enqueue for a task-less thread; the user's reply wakes the director, §B2). System line in the approval's thread (§B2 text for the outcome). Response `{status:'consumed', agent_id, resumed: job_id|null, reason: null|'thread_capped'|'thread_closed'}`. `mkdir agents/<id>` after commit (idempotent; `spawnJob` also ensures it). |
 | A3 | approval `pending` | Reject / expire (sweep) | — | — | as MVP; no agent, no budget row; system line in the approval's thread; no job enqueued |
 | A4 | — | `POST /api/agents` (user) | agent active | same name rules; trigger cap | same as A2 minus approval rows; `spawn_approval_id = NULL` |
-| A5 | active | `PUT /api/agents/:id {enabled}` (user) | enabled ↔ disabled | not retired (trigger) | MVP behaviour; queued jobs wait |
+| A5 | active | `PUT /api/agents/:id {enabled}` (user) | enabled ↔ disabled | not retired (trigger) | MVP behaviour; queued jobs wait. Disabling the last enabled worker is allowed (no guard) but the UI warns first (§B6); with zero enabled workers, task creation returns `no_enabled_worker` (T1, §T6.2) |
 | A6 | active / disabled | `PUT /api/agents/:id {retire:true}` (user) | retired | one IMMEDIATE txn, in order: (1) open tasks → `409 agent_has_open_tasks` (nothing changed); (2) a running job → `409 agent_busy`; (3) last worker → `409 last_worker`; (4) only then cancel the agent's queued jobs (`cancelled`; a queued peer `help` job triggers the help-end rule → its task `blocked/job_failed`); trigger `agents_retire_gate` is the backstop | `retired_at = now, enabled = 0`, presence `disabled`, `settings.changed {retired}`; budget row kept (history) |
 
 On A2, if the guard fails, the txn rolls back and the approval stays `pending` (`409 worker_cap` / `name_taken`, `400 invalid_payload`). `decideApproval` is still the only writer of decisions (TECH §1.1).
@@ -449,8 +454,8 @@ On A2, if the guard fails, the txn rolls back and the approval stays `pending` (
 
 | # | From | Event (actor) | To | Guard | Side effects |
 |---|---|---|---|---|---|
-| T1 | — | create (user) | todo | assignee = an active worker (UI dropdown; default = enabled worker with fewest open tasks, ties by `created_at`) | as MVP |
-| T2/T3 | — | `create_task` (director) | proposed / todo | `assignee` ∈ generated enum, re-checked at call (`unknown_assignee`); omitted → fewest-open rule | as MVP |
+| T1 | — | create (user) | todo | assignee = an active worker (UI dropdown; default = enabled worker with fewest open tasks, ties by `created_at`); no enabled worker → `409 no_enabled_worker`, hint "Enable a worker in Settings", nothing created | as MVP |
+| T2/T3 | — | `create_task` (director) | proposed / todo | no enabled worker → `no_enabled_worker` (§T6.2); `assignee` ∈ generated enum, re-checked at call (`unknown_assignee`); omitted → fewest-open rule | as MVP |
 | T11 | in_progress | worker `work` job ends after an ok `request_help` | blocked (`help`) | — | `help_agent_id` = `routed_to` of the job's last ok `request_help` (`director` or a peer). Enqueue a `help` job for `help_agent_id` (priority 60), in the same `finishAttempt` txn as MVP. Asker presence: `idle`, detail "Waiting on <help_agent_id> · T-n" (§B1); `blocked` ("Waiting on you") only while `helpEscalatedToUser(task)` (§T5.1) |
 | T11b (new) | blocked (`help`) | peer `help` job ends J5 after an ok `request_help` (escalation) | blocked (`help`) | caller is `help_agent_id` | `help_agent_id = 'director'`; enqueue director `help`; event `task.updated {help_agent_id}` |
 | T11c (new) | blocked (`help`), `help_agent_id` = a peer whose `help` job is still `queued` | user `reroute_help` (`POST /api/tasks/:id {action:'reroute_help'}`); or sweep (`rerouteStalePeerHelp`, same tick as approval expiry) when the job has been queued ≥ 10 min (`now − jobs.created_at ≥ 600 000 ms` on the peer `help` job) or the peer is disabled (retire is A6) | blocked (`help`) | kill not engaged (sweep only); peer job not `running` (else `409 help_running`) | in one txn: `help_agent_id = 'director'`; cancel the peer's queued `help` job (`failure_kind='cancelled'`, no help-end: the task no longer waits on that agent); enqueue director `help` (priority 60); system line "<peer> can't answer now (<queueReason>); asking the director instead."; `task.updated {help_agent_id}` |
@@ -493,7 +498,7 @@ Doctor D3 and doctor-mode `tools/list` (TECH §6.4) expect **seven** director-re
 
 ### T4.3 Prompt bundle (TECH §6.3 delta)
 - `<job …/>` gets `role="director|worker"` as its last attribute. The fake binary keys default steps on role, not on the id `worker`.
-- `<team>` (director and all worker jobs): one line per active agent, `<agent id="writer2" role="worker" enabled="1" presence="idle" skill="…"/>`. The skill note is escaped. It is user-approved text, so it is not wrapped in `<untrusted>`.
+- `<team>` (director and all worker jobs): one line per active agent, `<agent id="writer2" role="worker" enabled="1" presence="idle" skill="…"/>`. The skill note is escaped. It is user-approved text, so it is not wrapped in `<untrusted>`. When no worker is enabled, `<team>` also contains the line `no enabled worker` (the director must not call `create_task`; it tells the user to enable one).
 - Work and review jobs: `<review_comments artifact="<id>" round="r">` lists every anchored note on the **latest non-superseded artifact** (for review jobs, the current-round artifact), oldest first, max 50. For worker `work` jobs the note ids are fixed in the claim txn and written to the `job.started` payload as `review_note_ids` (existing event type; payload field added); the bundle renders exactly those ids. That is the only delivery record: the comment route (§T5.5) refuses comments while the task is `in_progress`, so a comment committed before the claim is always in the claimed run and none is committed during it. Comments on older artifacts are never sent (UI: "Not sent: round closed"). User comments are `<user_comment path line side>`. Agent comments are `<untrusted kind="review_comment" author path line side>`.
 - Peer help job instruction: `<asker> asked you (<agent>) for help on T-<id>. You may Read files here; you cannot edit. Answer once with post_message {wake:true, mentions:["<asker>"]}. If you cannot answer, call request_help (it goes to the director). Post nothing else.`
 - `prompts/worker.md`:
@@ -608,6 +613,7 @@ Enums marked *generated* are built per job in `/tools` (the shim fetches them on
 
 ### T6.2 `create_task` (changed)
 `assignee: {"enum": <generated>}`. If omitted, the server picks by the fewest-open rule (T1). A non-member value → `unknown_assignee`, hint lists the current ids. Everything else is as TECH §8.2.
+- **Zero enabled workers:** the generated enum would be empty, so `/tools` omits the `assignee` property from the schema (never an empty `enum`). Any call (with or without `assignee`) → `no_enabled_worker`, hint "Enable a worker in Settings"; no task created. Checked at call time, before `unknown_assignee`.
 
 ### T6.3 `post_message` (changed)
 `mentions.items.enum` = `["user","director", <all active worker ids>]`.
@@ -632,7 +638,7 @@ Workers still can't mention `user` (`cannot_address_user`). Messages without `wa
 - **Unanchored:** as TECH §8.4.
 - **Anchored** (any of `artifact_id/path/line` set → all three required, `anchor_incomplete`):
   - **Auth:** director `review` job for this task, and `artifact_id` = `currentArtifact(task)` with `verdict IS NULL` (`wrong_artifact`). Workers and other job kinds get `not_allowed_for_role`.
-  - **Guards:** `line_not_in_diff` unless `(path, side, line)` is a line of that artifact's diff, using `parseUnifiedDiff` in `lib/domain/diff.ts` (the same parser the UI uses); ≤ 20 anchored notes per job (`comment_cap`); ≤ 200 per artifact.
+  - **Guards:** `line_not_in_diff` unless `anchorInDiff(files, path, side, line)` (`lib/domain/diff.ts`, on `parseUnifiedDiff` output, the same parser the UI uses) is true. One rule, shared by this tool and `POST /api/artifacts/:id/comments`: `side='new'` matches an `add` or `ctx` line by `newNo`; `side='old'` matches a `del` line by `oldNo` only. Anything else (incl. `side='old'` on a context line) → `line_not_in_diff`; ≤ 20 anchored notes per job (`comment_cap`); ≤ 200 per artifact.
   - **Side effects:** `notes` row (trigger `notes_anchor_gate` is the backstop), `note.added {artifact_id, path, line, side}`; no job.
 - Must be called **before** `request_changes`/`approve` in the same job. After the verdict, the artifact is no longer verdict-NULL and the call is rejected.
 
@@ -646,6 +652,7 @@ Workers still can't mention `user` (`cannot_address_user`). Messages without `wa
     "target_agent": {"enum": ["director", "<generated: active enabled workers except the caller>"],
                      "description":"Worker work jobs only. Default director."} } }
 ```
+With no other active enabled worker the generated part is empty and the enum is `["director"]`.
 
 | Caller | `target_agent` | Routing |
 |---|---|---|
@@ -681,7 +688,7 @@ Event `help.requested {routed_to, task_id, options, peer}`. Returns `{ok, messag
 
 ## T8. Diff view implementation decisions
 
-- **Parser:** `lib/domain/diff.ts` (pure, shared by server and client). `parseUnifiedDiff(text) → File[]{path, oldPath, binary, hunks[]{header, oldStart, newStart, lines[]{type:'add'|'del'|'ctx'|'meta', oldNo, newNo, text}}}`. It handles `\ No newline at end of file`, renames and binary markers. `sideBySide(hunk)` pairs each run of `del` with the following run of `add` row by row and pads the shorter side.
+- **Parser:** `lib/domain/diff.ts` (pure, shared by server and client). `parseUnifiedDiff(text) → File[]{path, oldPath, binary, hunks[]{header, oldStart, newStart, lines[]{type:'add'|'del'|'ctx'|'meta', oldNo, newNo, text}}}`. It handles `\ No newline at end of file`, renames and binary markers. `sideBySide(hunk)` pairs each run of `del` with the following run of `add` row by row and pads the shorter side. `anchorInDiff(files, path, side, line)` is the single anchor rule (§T6.4: `new` = `add`/`ctx` by `newNo`, `old` = `del` by `oldNo`), used by `add_note`, the comment route and the UI's `c` handler.
 - **Highlighting: `highlight.js` core plus 9 grammars** (javascript, typescript, json, markdown, css, xml/html, python, bash, yaml). They are loaded with `import()` only when the diff view opens, so the main bundle is unaffected. Size is about 15 KB gzipped core plus grammars. Licence is BSD-3, with no transitive dependencies.
   - Shiki was rejected: WASM, about 1 MB+.
   - Prism was rejected: global side-effect registration, and the same per-line problem.
@@ -730,6 +737,7 @@ Event `help.requested {routed_to, task_id, options, peer}`. Returns `{ok, messag
   - `spawn_worker`: auth matrix (worker, director `review`/`help` → `not_allowed_for_role`), guards in order, replay idempotent (same input → same approval id);
   - `request_approval {kind:'spend', payload:{action:'spawn_worker', …}}` → `validation_error`, no approval row;
   - `create_task` enum generated in `/tools`, `unknown_assignee` after retire, fewest-open default;
+  - zero enabled workers (all disabled): `/tools` `create_task` schema has no `assignee` property, `create_task` (with or without `assignee`) → `no_enabled_worker`, `POST /api/tasks` → `409 no_enabled_worker`, no task row; `<team>` contains `no enabled worker`; `request_help.target_agent` enum = `["director"]`; e2e: New task Create disabled with "No worker is enabled. [Enable]", disabling the last enabled worker shows the confirm;
   - `post_message` wake matrix (§T6.3), incl. a peer wake on a non-blocked task → message, zero jobs;
   - `request_help` routing matrix (§T6.5), both caps, chain refusal;
   - `add_note` anchor auth, `line_not_in_diff`, `comment_cap`, rejected after the verdict.
@@ -752,6 +760,7 @@ Event `help.requested {routed_to, task_id, options, peer}`. Returns `{ok, messag
 - **Diff:**
   - `parseUnifiedDiff` fixtures (add-only, delete-only, rename, binary, no-newline, multiple hunks);
   - `sideBySide` pairing and padding;
+  - `anchorInDiff`: `new` on `add`/`ctx` ok, `old` on `del` ok; `old` on a context line → `line_not_in_diff` (fixture, both `add_note` and `POST /api/artifacts/:id/comments`); `new` on a line number outside every hunk → `line_not_in_diff`;
   - `splitHighlightedLines` keeps spans balanced on a multi-line block comment;
   - XSS fixture: a diff line `<img src=x onerror=alert(1)>` and `</span><script>` in a `.html` and an unknown-extension file render as text (no element created) in both modes;
   - compare route: R1→R2 output equals `git diff`, cross-task → `400`, a garbage head → `409 compare_unavailable`.
@@ -770,7 +779,7 @@ The argv and env assertions are unchanged and also run for help jobs. They add o
 - the agents list renders 3 workers with distinct presences and queue reasons;
 - the spawn card checkbox raises `max_concurrency`, and the `settings.changed` event is present;
 - axe passes on the agents list, the spawn card and the diff view (both modes, with comments open);
-- keyboard-only run: open the diff with `d`, `n` ×2, `c`, type, `Ctrl+Enter`, `v`, `Esc`, with the assertion that focus returns to the invoking element each time; plus side anchoring: unified `c` on a `−` line saves `side='old'` and on a context line `'new'`; side by side `←`/`→` then `c` saves the focused side, a padded cell is skipped with "no line on this side", and the textarea label reads "Comment on old line <n> of <path>";
+- keyboard-only run: open the diff with `d`, `n` ×2, `c`, type, `Ctrl+Enter`, `v`, `Esc`, with the assertion that focus returns to the invoking element each time; plus side anchoring: unified `c` on a `−` line saves `side='old'` and on a context line `'new'`; side by side `←`/`→` then `c` saves the focused side (a context row's old cell saves `'new'`, label says so), a padded cell is skipped with "no line on this side", and the textarea label reads "Comment on old line <n> of <path>";
 - agents list keyboard: `j`/`k` move between row buttons, `Tab` reaches [Edit budget] after its row button, `Enter` opens the §B1 destination (running task-less job → its thread; idle "Waiting on writer2 · T-7" → T-7), "Retired (n)" toggles `aria-expanded`.
 
 **Manual real-binary smoke (release gate, extends TECH §11):**
