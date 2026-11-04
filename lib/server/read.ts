@@ -4,7 +4,9 @@ import { now, localMidnight, DomainError } from '../util';
 import { budgetNumbers, queueReason, agentNumbers } from '../domain/claim';
 import { helpEscalatedToUser, peerHelpJob } from '../domain/tasks';
 import { globalBlock } from '../domain/wake';
-import { helpFailed, type TaskRow } from '../domain/rounds';
+import { helpFailed, getTask, type TaskRow } from '../domain/rounds';
+import { commentGate, commentsWithDelivery } from '../domain/comments';
+import { diffBetween } from '../domain/git';
 import { isOurs, ORCH_STALE_MS } from '../proc';
 import { preview } from './actions';
 
@@ -189,7 +191,7 @@ export function taskView(id: number) {
   const t = d.prepare(`SELECT t.*, th.status AS thread_status, th.cap_raises FROM tasks t JOIN threads th ON th.id=t.thread_id WHERE t.id=?`).get(id) as any;
   if (!t) throw new DomainError('not_found', 'no such task', 404);
   return { task: t,
-    notes: d.prepare(`SELECT * FROM notes WHERE task_id=? ORDER BY id DESC LIMIT 10`).all(id),
+    notes: d.prepare(`SELECT * FROM notes WHERE task_id=? AND artifact_id IS NULL ORDER BY id DESC LIMIT 10`).all(id),
     jobs: d.prepare(`SELECT id, agent_id, kind, status, attempts, max_attempts, cost_usd, budget_cap_usd, failure_kind, run_after, created_at, started_at, finished_at FROM jobs WHERE task_id=? ORDER BY id`).all(id),
     artifacts: d.prepare(`SELECT id, review_cycle, review_round, verdict, verdict_by, verdict_note, lines_added, lines_removed, files, created_at FROM artifacts WHERE task_id=? ORDER BY id`).all(id),
     approval: d.prepare(`SELECT * FROM approvals WHERE task_id=? ORDER BY id DESC LIMIT 1`).get(id),
@@ -203,6 +205,26 @@ export function artifactView(id: number) {
   if (!a) throw new DomainError('not_found', 'no such artifact', 404);
   let diff = ''; try { diff = fs.readFileSync(a.diff_path, 'utf8'); } catch { diff = ''; }
   const lines = diff.split('\n');
+  const task = getTask(d, a.task_id)!;
+  const gate = commentGate(d, a, task);
+  const siblings = d.prepare(`SELECT id, review_cycle AS cycle, review_round AS round, head_commit AS head FROM artifacts WHERE task_id=? AND (verdict IS NULL OR verdict<>'superseded') ORDER BY id`).all(a.task_id);
   return { ...a, files: JSON.parse(a.files), diff: lines.length > 2000 ? lines.slice(0, 2000).join('\n') : diff, truncated: lines.length > 2000,
-    current: a.review_cycle === a.task_cycle && a.review_round === a.task_round };
+    current: a.review_cycle === a.task_cycle && a.review_round === a.task_round,
+    comments: commentsWithDelivery(d, a, task), siblings, comment_gate: gate };
+}
+
+/** GET /api/artifacts/:id/compare?from=<artifactId>: git diff between two round heads of one task (outside any write txn, not cached). */
+export function compareView(id: number, fromId: number) {
+  const d = db();
+  const to = d.prepare(`SELECT * FROM artifacts WHERE id=?`).get(id) as any;
+  const from = d.prepare(`SELECT * FROM artifacts WHERE id=?`).get(fromId) as any;
+  if (!to || !from) throw new DomainError('not_found', 'no such artifact', 404);
+  if (to.task_id !== from.task_id) throw new DomainError('wrong_task', 'both artifacts must belong to the same task', 400);
+  let diff: string;
+  try { diff = diffBetween(to.task_id, from.head_commit, to.head_commit); }
+  catch (e: any) { throw new DomainError('compare_unavailable', String(e?.message ?? e).split('\n')[0].slice(0, 200), 409); }
+  const lines = diff.split('\n');
+  const task = getTask(d, to.task_id)!;
+  return { from: { id: from.id, cycle: from.review_cycle, round: from.review_round, head: from.head_commit }, to: { id: to.id, cycle: to.review_cycle, round: to.review_round, head: to.head_commit },
+    diff: lines.length > 2000 ? lines.slice(0, 2000).join('\n') : diff, truncated: lines.length > 2000, from_comments: commentsWithDelivery(d, from, task) };
 }

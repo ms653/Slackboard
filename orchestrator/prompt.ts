@@ -4,9 +4,11 @@ import type { JobRow } from '@/lib/domain/jobs';
 import { getTask, currentArtifact } from '@/lib/domain/rounds';
 import { agentRole } from '@/lib/domain/jobs';
 import { enabledWorkerIds } from '@/lib/domain/agents';
+import { xmlEsc } from '@/lib/util';
+import { reviewCommentsFor } from '@/lib/domain/comments';
 
 /** XML-escape so embedded content cannot close or forge tags (TECH §6.3). */
-export const esc = (s: string): string => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+export const esc = xmlEsc;
 const iso = (t: number) => new Date(t).toISOString().slice(0, 16);
 const MAX = 24 * 1024;
 
@@ -21,7 +23,7 @@ export function renderPrompt(db: DB, j: JobRow, reason: string | null): string {
   <description>${esc(t.description)}</description>
   <acceptance>${esc(t.acceptance)}</acceptance>
 </task>`);
-    const notes = db.prepare(`SELECT * FROM notes WHERE task_id=? ORDER BY id DESC LIMIT 10`).all(t.id).reverse() as any[];
+    const notes = db.prepare(`SELECT * FROM notes WHERE task_id=? AND artifact_id IS NULL ORDER BY id DESC LIMIT 10`).all(t.id).reverse() as any[];
     if (notes.length) parts.push(`<notes>\n${notes.map((n) => `  <untrusted kind="note" author="${n.author_agent_id ?? 'user'}">${esc(n.body)}</untrusted>`).join('\n')}\n</notes>`);
   }
   const msgs = db.prepare(`SELECT * FROM messages WHERE thread_id=? ORDER BY id DESC LIMIT 30`).all(j.thread_id).reverse() as any[];
@@ -30,6 +32,8 @@ export function renderPrompt(db: DB, j: JobRow, reason: string | null): string {
     : m.author_kind === 'system' ? `  <system id="${m.id}">${esc(m.body)}</system>`
     : `  <untrusted kind="agent_message" author="${m.author_agent_id}" id="${m.id}">${esc(m.body)}</untrusted>`);
   parts.push(`<thread>\n${total > msgs.length ? `  [${total - msgs.length} earlier messages omitted]\n` : ''}${lines.join('\n')}\n</thread>`);
+  let comments = '';
+  if ((j.kind === 'review' || j.kind === 'work') && t) comments = reviewCommentsFor(db, j, t, currentArtifact(db, t));
   if (j.kind === 'review' && t) {
     const a = currentArtifact(db, t);
     if (a) {
@@ -41,13 +45,27 @@ export function renderPrompt(db: DB, j: JobRow, reason: string | null): string {
   }
   if (j.attempts > 1 && reason && !['no_handoff', 'max_turns'].includes(reason))
     parts.unshift(`<retry attempt="${j.attempts}">Your previous run was interrupted. Tool calls you already made are recorded; repeating one returns its original result. Re-check the context, then continue.</retry>`);
-  if (reason === 'max_turns') parts.unshift(`<continue>You hit the turn limit. In at most 3 tool calls, finish: submit_for_review, request_help, or update_task block.</continue>`);
-  if (reason === 'no_handoff') parts.unshift(`<continue>You ended without a handoff. Do exactly one of: submit_for_review, request_help, update_task block.</continue>`);
-  parts.push(`<instructions>${instructions(db, j, t)}</instructions>`);
+  const opts = handoffOptions(db, j);
+  if (reason === 'max_turns') parts.unshift(`<continue>You hit the turn limit. In at most 3 tool calls, finish: ${orList(opts)}.</continue>`);
+  if (reason === 'no_handoff') parts.unshift(`<continue>You ended without a handoff. Do exactly one of: ${opts.join(', ')}.</continue>`);
+  // <review_comments> and <instructions> are the protected tail: the 24 KB cut below only trims the rest, so what is rendered is what was delivered
+  const tail = [comments, `<instructions>${instructions(db, j, t)}</instructions>`].filter(Boolean);
   let out = parts.join('\n');
-  if (out.length > MAX) out = out.slice(0, MAX - 200) + '\n[context truncated]\n' + parts[parts.length - 1];
-  return out;
+  const tailText = tail.join('\n');
+  if (out.length + tailText.length + 1 > MAX) out = out.slice(0, Math.max(0, MAX - tailText.length - 200)) + '\n[context truncated]';
+  return out + '\n' + tailText;
 }
+
+/** The handoff tools this job kind can actually call (continuation text must not offer anything else). */
+export function handoffOptions(db: DB, j: JobRow): string[] {
+  const role = agentRole(db, j.agent_id);
+  if (j.kind === 'work') return ['submit_for_review', 'request_help', 'update_task block'];
+  if (j.kind === 'review') return ['update_task approve', 'update_task request_changes'];
+  if (j.kind === 'help' && role === 'worker') return ['post_message with wake:true (your answer to the asker)', 'request_help (to the director)'];
+  if (j.kind === 'help') return ['post_message with wake:true (your answer)', 'request_help (to the user)'];
+  return ['post_message'];
+}
+const orList = (a: string[]) => a.length < 2 ? a.join('') : `${a.slice(0, -1).join(', ')}, or ${a[a.length - 1]}`;
 
 /** <team>: one line per active agent (PHASE2 §T4.3). The skill note is user-approved text, so escaped but not <untrusted>. */
 export function team(db: DB): string {

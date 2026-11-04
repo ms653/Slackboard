@@ -1,4 +1,5 @@
 import type { DB } from '../db';
+import { latestArtifact, selectCommentIds } from './comments';
 import { now, localMidnight, uuid, sha256 } from '../util';
 import { emit } from './events';
 import { cancelQueued, refreshPresence, type JobRow } from './jobs';
@@ -143,7 +144,10 @@ export function claimNext(db: DB, me: string, token: string): JobRow | null {
     emit(db, 'task.claimed', job.agent_id, 'task', job.task_id!, { job_id: job.id }, job.id);
   }
   db.prepare(`UPDATE threads SET agent_job_count = agent_job_count + 1 WHERE id=?`).run(job.thread_id);
-  emit(db, 'job.started', 'system', 'job', job.id, { agent: job.agent_id, kind: job.kind, attempt: job.attempts, task_id: job.task_id }, job.id);
+  // PHASE2 §T4.3: the comments this work run renders are fixed here, in the claim txn (the only delivery record)
+  let reviewNotes: Record<string, unknown> = {};
+  if (job.kind === 'work' && job.task_id) { const la = latestArtifact(db, job.task_id); reviewNotes = { review_note_ids: la ? selectCommentIds(db, la.id) : [] }; }
+  emit(db, 'job.started', 'system', 'job', job.id, { agent: job.agent_id, kind: job.kind, attempt: job.attempts, task_id: job.task_id, ...reviewNotes }, job.id);
   refreshPresence(db, job.agent_id);
   return job;
 }

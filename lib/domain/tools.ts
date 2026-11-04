@@ -5,7 +5,9 @@ import { emit } from './events';
 import { enqueueJob, PRIORITY, kindSettings, refreshPresence, type JobRow } from './jobs';
 import { insertMessage, systemMessage } from './messages';
 import { getThread, generalChannel } from './threads';
-import { getTask, lastHead } from './rounds';
+import { getTask, lastHead, currentArtifact } from './rounds';
+import { anchorInDiff } from './diff';
+import { artifactDiffFiles, insertNoteRow, PER_JOB_CAP } from './comments';
 import { createTask, applySubmitForReview, approveReview, requestChanges, blockTask, cancelTask, editTask, addNote, unblockTask } from './tasks';
 import { workspaceFacts, workspaceChanged, captureRound, type Capture } from './git';
 import { activeWorkerIds, enabledWorkerIds, nameTaken, MAX_WORKERS, WORK_CAP_USD } from './agents';
@@ -27,8 +29,10 @@ export const TOOL_SCHEMAS: Record<string, { description: string; inputSchema: Re
     task_id: { type: 'integer' }, action: { enum: ['submit_for_review', 'approve', 'request_changes', 'block', 'cancel', 'edit'] },
     note: { type: 'string', maxLength: 4000 }, title: { type: 'string', minLength: 1, maxLength: 200 },
     description: { type: 'string', maxLength: 8000 }, acceptance: { type: 'string', maxLength: 4000 } } } },
-  add_note: { description: 'Record a plan or decision on a task.', inputSchema: { type: 'object', additionalProperties: false, required: ['task_id', 'body'], properties: {
-    task_id: { type: 'integer' }, body: { type: 'string', minLength: 1, maxLength: 4000 } } } },
+  add_note: { description: 'Record a plan or decision on a task. Director review jobs may anchor it to a diff line (artifact_id, path, line, side) before approve/request_changes.', inputSchema: { type: 'object', additionalProperties: false, required: ['task_id', 'body'], properties: {
+    task_id: { type: 'integer' }, body: { type: 'string', minLength: 1, maxLength: 4000 },
+    artifact_id: { type: 'integer' }, path: { type: 'string', minLength: 1, maxLength: 1000 },
+    line: { type: 'integer', minimum: 1 }, side: { enum: ['old', 'new'], default: 'new' } } } },
   request_help: { description: 'Ask for help: worker -> director (or a peer worker with target_agent), director -> user.', inputSchema: { type: 'object', additionalProperties: false, required: ['question'], properties: {
     question: { type: 'string', minLength: 1, maxLength: 2000 }, task_id: { type: 'integer' },
     options: { type: 'array', items: { type: 'string', maxLength: 200 }, maxItems: 4 },
@@ -216,6 +220,18 @@ function dispatch(db: DB, c: Caller, tool: string, input: any, pre: { cap?: Capt
     case 'add_note': {
       const t = getTask(db, input.task_id);
       if (!t) return rej('wrong_task', 'no such task');
+      if (input.artifact_id !== undefined || input.path !== undefined || input.line !== undefined) {   // anchored inline comment (PHASE2 §T6.4)
+        if (input.artifact_id === undefined || input.path === undefined || input.line === undefined) return rej('anchor_incomplete', 'artifact_id, path and line are all required for an anchored note');
+        if (c.role !== 'director' || c.kind !== 'review' || c.taskId !== t.id) return rej('not_allowed_for_role', 'only the director review job for this task can anchor notes');
+        const cur = currentArtifact(db, t);
+        if (!cur || cur.id !== input.artifact_id || cur.verdict !== null) return rej('wrong_artifact', 'anchor on the current-round artifact before approve/request_changes');
+        const side: 'old' | 'new' = input.side ?? 'new';
+        if (!anchorInDiff(artifactDiffFiles(cur), input.path, side, input.line))
+          return rej('line_not_in_diff', `${side} line ${input.line} of ${input.path} is not in the diff (new = added or unchanged line, old = removed line)`);
+        if ((db.prepare(`SELECT count(*) n FROM tool_calls WHERE job_id=? AND tool='add_note' AND outcome='ok' AND json_extract(input,'$.artifact_id') IS NOT NULL`).get(c.jobId) as any).n >= PER_JOB_CAP)
+          return rej('comment_cap', `at most ${PER_JOB_CAP} anchored comments per review job`);
+        return { ok: true, note_id: insertNoteRow(db, cur, c.agent, { path: input.path, line: input.line, side, body: input.body }) };
+      }
       if (c.role !== 'director' && t.assignee_agent_id !== c.agent) return rej('wrong_task', 'only the assignee or director can add notes');
       return { ok: true, note_id: addNote(db, t.id, c.agent, input.body) };
     }
@@ -228,7 +244,7 @@ function dispatch(db: DB, c: Caller, tool: string, input: any, pre: { cap?: Capt
       if (peer && c.kind !== 'work') return rej('not_allowed_for_role', c.kind === 'help' ? 'peers can only escalate to the director' : 'only a work job can ask a peer');
       if (c.role !== 'director' && (db.prepare(`SELECT count(*) AS n FROM tool_calls WHERE job_id=? AND tool='request_help' AND outcome='ok'`).get(c.jobId) as any).n >= 1)
         return rej('validation_error', 'one help request per run');
-      if (c.role !== 'director' && input.task_id !== undefined && input.task_id !== c.taskId) return rej('wrong_task', 'use your own task');
+      if (c.role !== 'director' && input.task_id !== undefined && input.task_id !== c.taskId) return rej('wrong_task', c.taskId == null ? 'this job has no task; omit task_id' : 'use your own task');
       const taskId = c.role === 'director' ? (input.task_id ?? c.taskId) : c.taskId;
       if (peer) {
         if (target === c.agent || !enabledWorkerIds(db).includes(target!)) return rej('unknown_agent', `${target} cannot be asked now; omit target_agent to ask the director`);

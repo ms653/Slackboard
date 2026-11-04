@@ -58,3 +58,9 @@ export function captureRound(taskId: number, base: string, round: number): Captu
   const diff = git(taskId, ['diff', base, head]).out;
   return { head, diff, files, added: files.reduce((s, f) => s + f.added, 0), removed: files.reduce((s, f) => s + f.removed, 0) };
 }
+
+/** `git diff --no-color <from> <to>` between two round heads of one task (read-only; PHASE2 §T5.5). Throws on a missing object. */
+export function diffBetween(taskId: number, from: string, to: string): string {
+  if (!/^[0-9a-f]{7,64}$/.test(from) || !/^[0-9a-f]{7,64}$/.test(to)) throw new Error('not a commit id');
+  return git(taskId, ['diff', '--no-color', from, to, '--']).out;
+}

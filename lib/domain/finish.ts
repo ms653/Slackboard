@@ -133,8 +133,8 @@ export function finishAttempt(db: DB, jobId: number, o: Outcome, expectedOwner: 
       setStatus(db, task, 'blocked', 'system', { blocked_reason: 'help', help_agent_id: target });
       enqueueJob(db, { agent: target, kind: 'help', thread: task.thread_id, task: task.id, priority: PRIORITY.help });
       if (target !== 'director') systemMessage(db, task.thread_id, `T-${task.id} blocked: waiting on ${target} (help) · director can see this`);
-    } else if (j.kind === 'help' && c.rule === 'J5' && task && task.status === 'blocked' && task.blocked_reason === 'help'
-        && task.help_agent_id === j.agent_id && agentRole(db, j.agent_id) === 'worker' && hasToolCall(db, j.id, 'request_help')) {   // T11b: a peer escalates to the director
+    } else if (j.kind === 'help' && task && task.status === 'blocked' && task.blocked_reason === 'help'
+        && task.help_agent_id === j.agent_id && agentRole(db, j.agent_id) === 'worker' && hasToolCall(db, j.id, 'request_help')) {   // T11b: a peer escalates to the director, on any terminal outcome once its ok request_help exists
       db.prepare(`UPDATE tasks SET help_agent_id='director', updated_by='system', updated_at=?, version=version+1 WHERE id=?`).run(now(), task.id);
       emit(db, 'task.updated', 'system', 'task', task.id, { help_agent_id: 'director' });
       enqueueJob(db, { agent: 'director', kind: 'help', thread: task.thread_id, task: task.id, priority: PRIORITY.help });

@@ -12,6 +12,7 @@ import { cancelQueued, refreshAllPresence, refreshPresence } from '../domain/job
 import { control, engageKill, resume as resumeKill } from '../domain/control';
 import { paths } from '../paths';
 import { helpEnded } from '../domain/finish';
+import { addUserComment } from '../domain/comments';
 
 /** User actions behind the API routes. Git facts are read before the write txn (TECH §3.1, §5.9). */
 const db = () => getDb();
@@ -174,4 +175,9 @@ export async function doctor() {
   const r = await control(db(), 'doctor', {}, 2000);
   if (!r) throw new DomainError('orchestrator_down', 'start the orchestrator to run checks', 503);
   return { started: true };
+}
+
+/** POST /api/artifacts/:id/comments: a user's inline comment (PHASE2 §T5.5). One IMMEDIATE txn; wakes nobody. */
+export function postComment(artifactId: number, input: any) {
+  return tx(db(), () => addUserComment(db(), artifactId, input));
 }
