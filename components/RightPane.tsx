@@ -5,7 +5,7 @@ import { api } from './api';
 import { Composer } from './Composer';
 import { ActionButton, Dialog, NoteDialog, TaskStatus, Time, usd } from './ui';
 import { retryToast } from './NeedsYou';
-import { EDIT_BUDGET, budgetHitAgent, systemLineHasAction, reproposeDefault } from '../lib/systemLines';
+import { EDIT_BUDGET, budgetHitAgent, systemLineHasAction, reproposeDefault, notWokenReason, peerNotStartedAgent } from '../lib/systemLines';
 
 function useFetch<T>(url: string | null) {
   const rev = useStore((s) => s.rev);
@@ -36,12 +36,34 @@ function PaneShell({ title, children, footer }: { title: React.ReactNode; childr
   );
 }
 
-function SystemBody({ body }: { body: string }) {
-  const { openSettingsAgent } = useStore();
+/** System line text plus inline real buttons: [Edit budget], [Raise cap]/[Reopen thread] (director not woken), [Ask the director instead] (peer hasn't started). */
+function SystemBody({ body, thread, task, lastPeerLine }: { body: string; thread: any; task: any; lastPeerLine: boolean }) {
+  const { openSettingsAgent, refresh, toast } = useStore();
   const agent = budgetHitAgent(body);
-  if (!agent) return <>{body}</>;
-  const i = body.indexOf(EDIT_BUDGET);
-  return <>{body.slice(0, i)}<button type="button" className="underline text-sky-300" onClick={() => openSettingsAgent({ agent, field: 'usd' })}>Edit budget</button>{body.slice(i + EDIT_BUDGET.length)}</>;
+  const btn = 'ml-1 underline text-sky-300';
+  if (agent) {
+    const i = body.indexOf(EDIT_BUDGET);
+    return <>{body.slice(0, i)}<button type="button" className="underline text-sky-300" onClick={() => openSettingsAgent({ agent, field: 'usd' })}>Edit budget</button>{body.slice(i + EDIT_BUDGET.length)}</>;
+  }
+  const why = notWokenReason(body);
+  if (why === 'thread_capped' && thread.status === 'capped' && thread.cap_raises === 0)
+    return <>{body} <button type="button" className={btn} onClick={async () => { await api(`/api/threads/${thread.id}`, { body: { action: 'raise_cap' } }); await refresh(); toast('Cap raised. Reply in the thread to wake the director.'); }}>Raise cap</button></>;
+  if (why === 'thread_closed' && thread.status === 'closed')
+    return <>{body} <button type="button" className={btn} onClick={async () => { await api(`/api/threads/${thread.id}`, { body: { action: 'reopen' } }); await refresh(); toast('Thread reopened. Reply in the thread to wake the director.'); }}>Reopen thread</button></>;
+  const peer = peerNotStartedAgent(body);
+  if (peer && lastPeerLine && task && task.status === 'blocked' && task.blocked_reason === 'help' && task.help_agent_id === peer)
+    return <>{body} <button type="button" className={btn} onClick={async () => {
+      try { await api(`/api/tasks/${task.id}`, { body: { action: 'reroute_help' } }); await refresh(); } catch (e: any) { toast(e.code === 'help_running' ? `${peer} is answering right now` : (e.hint || e.code), 'error'); } }}>Ask the director instead</button></>;
+  return <>{body}</>;
+}
+/** Chip text for a message in a task thread: "help → <target>" on a request, "peer help · read-only" on a peer's answer (PHASE2 §B3). */
+function msgChip(m: any): string {
+  if (m.kind === 'help' && m.author_kind === 'agent') {
+    const mentions: string[] = JSON.parse(m.mentions || '[]');
+    return `help → ${m.author_agent_id === 'director' ? 'you' : mentions.find((x) => x !== 'director') ?? 'director'}`;
+  }
+  if (m.author_kind === 'agent' && m.job_kind === 'help' && m.author_agent_id !== 'director') return 'peer help · read-only';
+  return m.kind !== 'chat' ? m.kind : '';
 }
 const roleChip = (m: any) => m.author_kind === 'user' ? 'you' : m.author_kind === 'system' ? 'system' : m.author_agent_id;
 
@@ -56,6 +78,7 @@ function ThreadPane({ id }: { id: number }) {
   const th = data.thread, task = data.task;
   const sys = data.messages.filter((m: any) => m.author_kind === 'system').length;
   const pct = (a: number, b: number) => a / b >= 0.8;
+  const lastPeerIdx = data.messages.reduce((acc: number, m: any, i: number) => m.author_kind === 'system' && peerNotStartedAgent(m.body) ? i : acc, -1);
   const threadAct = async (action: string) => {
     const r: any = await api(`/api/threads/${id}`, { body: { action } }); await refresh();
     const tk = task ? `T-${task.id}` : '';
@@ -66,7 +89,7 @@ function ThreadPane({ id }: { id: number }) {
   return (
     <PaneShell title={<>Thread: {th.title}</>} footer={<>
       <div className="px-3 pt-2 text-xs text-slate-400">
-        Agent messages {th.agent_msg_count}/{th.max_agent_msgs} · Agent runs {th.agent_job_count}/{th.max_agent_jobs}
+        Agent messages {th.agent_msg_count}/{th.max_agent_msgs} · Agent runs {th.agent_job_count}/{th.max_agent_jobs}{data.peer_help > 0 && <> · Peer help {data.peer_help}/2</>}
         {(pct(th.agent_msg_count, th.max_agent_msgs) || pct(th.agent_job_count, th.max_agent_jobs)) && <span className="text-amber-300 ml-1">· Near limit</span>}
       </div>
       {th.status === 'closed'
@@ -85,10 +108,10 @@ function ThreadPane({ id }: { id: number }) {
         {sys > 0 && <button className="text-xs underline ml-auto" onClick={() => setShowSys((s) => !s)}>{showSys ? 'Hide' : 'Show'} {sys} system events</button>}
       </div>
       <ol className="p-3 space-y-3" aria-live="polite" data-nav-list="messages">
-        {data.messages.map((m: any) => m.author_kind === 'system'
-          ? ((showSys || systemLineHasAction(m.body)) && <li key={m.id} tabIndex={0} className="text-xs text-slate-400 focus:outline focus:outline-2 focus:outline-sky-400"><span aria-hidden>▸</span> system · <Time t={m.created_at} now={boot.now} /> <SystemBody body={m.body} /></li>)
+        {data.messages.map((m: any, i: number) => m.author_kind === 'system'
+          ? ((showSys || systemLineHasAction(m.body)) && <li key={m.id} tabIndex={0} className="text-xs text-slate-400 focus:outline focus:outline-2 focus:outline-sky-400"><span aria-hidden>▸</span> system · <Time t={m.created_at} now={boot.now} /> <SystemBody body={m.body} thread={th} task={task} lastPeerLine={lastPeerIdx === i} /></li>)
           : <li key={m.id} tabIndex={0} className={`focus:outline focus:outline-2 focus:outline-sky-400 ${m.kind === 'help' ? 'border-l-2 border-amber-400 pl-2' : ''}`}>
-              <div className="text-xs text-slate-400"><span className="font-semibold text-slate-200">{roleChip(m)}</span>{m.kind !== 'chat' ? ` (${m.kind})` : ''} · <Time t={m.created_at} now={boot.now} /></div>
+              <div className="text-xs text-slate-400"><span className="font-semibold text-slate-200">{roleChip(m)}</span>{msgChip(m) ? ` (${msgChip(m)})` : ''} · <Time t={m.created_at} now={boot.now} /></div>
               <div className="text-sm whitespace-pre-wrap">{m.body}</div>
             </li>)}
         {data.running.map((r: any) => <li key={r.agent_id} className="text-xs text-sky-300">{r.agent_id} is working…</li>)}
@@ -165,6 +188,9 @@ function TaskPane({ id }: { id: number }) {
           {card.queued === 'agent budget' && <button className="underline text-sky-300" onClick={() => openSettingsAgent({ agent: t.assignee_agent_id, field: 'usd' })}>Edit budget</button>}
           {card.queued === 'disabled' && <button className="underline text-sky-300" onClick={() => openSettingsAgent({ agent: t.assignee_agent_id, field: 'enabled' })}>Enable</button>}</p>}
         {t.status === 'blocked' && t.blocked_reason === 'help' && <p className="text-slate-300">Waiting on {helper ?? 'the helper'}; reroute help or reply first</p>}
+        {card.peer_help?.status === 'queued' && <p><ActionButton label="Ask the director instead" run={async () => {
+          try { await post('reroute_help'); toast(`Asking the director instead of ${card.peer_help.agent}`); }
+          catch (e: any) { if (e.code === 'help_running') { toast(`${card.peer_help.agent} is answering right now`, 'error'); return; } throw e; } }} /></p>}
         {reassignable && agentTop && <p className="text-slate-300">Proposed by the director; to move it, cancel and ask the director to re-propose.</p>}
         {reassignable && !agentTop && (enabledWorkers.length === 0
           ? <p className="text-amber-200">No worker is enabled. <button className="underline text-sky-300" onClick={() => openSettingsAgent({ agent: t.assignee_agent_id, field: 'enabled' })}>Enable</button></p>

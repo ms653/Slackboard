@@ -61,9 +61,9 @@ export function AgentsList({ now }: { now: number }) {
           {lines.map((l) => <div key={l} className="text-xs text-slate-400 truncate">{l}</div>)}
         </button>
         {reason === 'agent budget' && a.presence !== 'working' &&
-          <button className="ml-2 text-xs underline text-sky-300" onClick={() => openSettingsAgent({ agent: a.id, field: 'usd' })}>Edit budget</button>}
+          <button className="ml-2 text-xs underline text-sky-300" aria-label={`Edit budget for ${a.id}`} onClick={() => openSettingsAgent({ agent: a.id, field: 'usd' })}>Edit budget</button>}
         {reason === 'disabled' && a.role === 'worker' && !a.retired_at &&
-          <button className="ml-2 text-xs underline text-sky-300" onClick={() => openSettingsAgent({ agent: a.id, field: 'enabled' })}>Enable</button>}
+          <button className="ml-2 text-xs underline text-sky-300" aria-label={`Enable ${a.id}`} onClick={() => openSettingsAgent({ agent: a.id, field: 'enabled' })}>Enable</button>}
       </li>);
   };
   return (

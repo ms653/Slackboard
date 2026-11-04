@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import { db as getDb } from '../db';
 import { now, localMidnight, DomainError } from '../util';
 import { budgetNumbers, queueReason, agentNumbers } from '../domain/claim';
-import { helpEscalatedToUser } from '../domain/tasks';
+import { helpEscalatedToUser, peerHelpJob } from '../domain/tasks';
 import { globalBlock } from '../domain/wake';
 import { helpFailed, type TaskRow } from '../domain/rounds';
 import { isOurs, ORCH_STALE_MS } from '../proc';
@@ -21,10 +21,10 @@ export type Badge = { icon: string; text: string; retry?: { run_after: number; a
 const FAIL_TEXT: Record<string, string> = { timeout_idle: 'no output for 3 min', timeout_wall: 'time limit', orphaned: 'orchestrator restarted', error_during_execution: 'error' };
 
 /** Card lines derived once, server-side (UX §5). */
-function decorate(t: TaskRow, ny: Set<string>, extra: { threadStatus: string; capRaises: number; replies: number; cost: number; files: number; drift: boolean; hfailed: boolean; escalated: boolean; helperReason?: string | null; failedHelper?: string | null; queued?: string | null; redo: boolean; workerNote?: string | null; badge: Badge | null }) {
+function decorate(t: TaskRow, ny: Set<string>, extra: { threadStatus: string; capRaises: number; replies: number; cost: number; files: number; drift: boolean; hfailed: boolean; escalated: boolean; helperReason?: string | null; failedHelper?: string | null; queued?: string | null; peerHelp?: { job_id: number; agent: string; status: string } | null; redo: boolean; workerNote?: string | null; badge: Badge | null }) {
   let reason: string | null = null;
   if (t.status === 'blocked') {
-    reason = ({ help: extra.escalated ? 'Blocked: waiting on you (help)' : `Blocked: waiting on ${(t as any).help_agent_id ?? 'director'} (help)${extra.helperReason ? ` · ${(t as any).help_agent_id} ${extra.helperReason}` : ''}`, review_cap: 'Blocked: you need to decide (review limit)',
+    reason = ({ help: extra.escalated ? 'Blocked: waiting on you (help)' : `Blocked: waiting on ${(t as any).help_agent_id ?? 'director'} (help)${extra.helperReason ? ` · ${(t as any).help_agent_id}: ${extra.helperReason}` : ''}`, review_cap: 'Blocked: you need to decide (review limit)',
       job_failed: extra.hfailed ? `Blocked: ${extra.failedHelper ?? 'director'} could not answer (help failed)` : extra.drift ? 'Blocked: workspace changed after review' : 'Blocked: failed 3 times',
       killed: 'Blocked: stopped by kill switch', agent_blocked: extra.workerNote ? `Blocked by worker: ${extra.workerNote}` : 'Blocked by worker', user: 'Blocked: you cancelled the run' } as Record<string, string>)[t.blocked_reason!] ?? 'Blocked';
   }
@@ -38,7 +38,7 @@ function decorate(t: TaskRow, ny: Set<string>, extra: { threadStatus: string; ca
     : ny.has(`thread_capped:${t.thread_id}`) ? 'Thread capped' : null;
   const round = t.review_round > 0 || extra.redo ? `round ${extra.redo ? t.review_round + 1 : t.review_round} of 2${extra.redo ? ', redo' : ''}` : null;
   const done = t.status === 'done' ? (t.parent_id ? 'Done' : t.accepted_at ? 'Accepted' : 'Ready, not accepted') : null;
-  return { ...t, reason, waiting, flag, round, done, queued: extra.queued ?? null, help_escalated_to_user: extra.escalated, replies: extra.replies, cost: extra.cost, files: extra.files, badge: extra.badge };
+  return { ...t, reason, waiting, flag, round, done, queued: extra.queued ?? null, help_escalated_to_user: extra.escalated, peer_help: extra.peerHelp ?? null, replies: extra.replies, cost: extra.cost, files: extra.files, badge: extra.badge };
 }
 
 export function bootstrap() {
@@ -92,6 +92,7 @@ export function bootstrap() {
       else if (!queued) queued = qr;
     }
     const failedHelper = helpFailed(d, t) ? (d.prepare(`SELECT agent_id FROM jobs WHERE task_id=? AND finished_at IS NOT NULL ORDER BY id DESC LIMIT 1`).get(t.id) as any)?.agent_id : null;
+    const ph = peerHelpJob(d, t);
     const redo = !!d.prepare(`SELECT 1 FROM artifacts WHERE task_id=? AND review_cycle=? AND review_round=? AND verdict='superseded'`).get(t.id, t.review_cycle, t.review_round + 1)
       && ['todo', 'in_progress'].includes(t.status);
     const lastJob = d.prepare(`SELECT status, attempts, max_attempts, failure_kind, run_after, exit_code, continuations FROM jobs WHERE task_id=? ORDER BY id DESC LIMIT 1`).get(t.id) as any;
@@ -121,7 +122,7 @@ export function bootstrap() {
       badge = { icon: '⟲', text: 'Claim expired, requeued' };
     }
     return decorate(t, keys, { threadStatus: t.thread_status, capRaises: t.cap_raises, replies, cost, files: art ? JSON.parse(art.files).length : 0,
-      drift: lastFail?.failure_kind === 'workspace_drift', hfailed: helpFailed(d, t), escalated, redo, workerNote, badge, helperReason, failedHelper, queued });
+      drift: lastFail?.failure_kind === 'workspace_drift', hfailed: helpFailed(d, t), escalated, redo, workerNote, badge, helperReason, failedHelper, queued, peerHelp: ph ? { job_id: ph.id, agent: ph.agent_id, status: ph.status } : null });
   });
   const threads = d.prepare(`SELECT th.*, (SELECT id FROM tasks WHERE thread_id=th.id) AS task_id,
       (SELECT body FROM messages WHERE thread_id=th.id ORDER BY id LIMIT 1) AS first_body,
@@ -157,7 +158,8 @@ export function bootstrap() {
       (SELECT thread_id FROM jobs WHERE agent_id=a.id AND status='running') AS running_thread,
       (SELECT task_id FROM jobs WHERE agent_id=a.id AND status='queued' ORDER BY created_at, id LIMIT 1) AS queued_task,
       (SELECT thread_id FROM jobs WHERE agent_id=a.id AND status='queued' ORDER BY created_at, id LIMIT 1) AS queued_thread,
-      (SELECT t.thread_id FROM tasks t WHERE t.assignee_agent_id=a.id AND t.status='blocked' AND t.blocked_reason='help' ORDER BY t.id LIMIT 1) AS waiting_thread
+      (SELECT t.thread_id FROM tasks t WHERE t.assignee_agent_id=a.id AND t.status='blocked' AND t.blocked_reason='help' ORDER BY t.id LIMIT 1) AS waiting_thread,
+      (SELECT t.assignee_agent_id FROM jobs j JOIN tasks t ON t.id=j.task_id WHERE j.agent_id=a.id AND j.status='running' AND j.kind='help' AND a.role='worker') AS helping_asker
       FROM agents a ORDER BY (a.role <> 'director'), a.created_at, a.rowid`).all().map((a: any) => ({ ...a, queue_reason: queueReason(d, a.id),
         budget: agentNumbers(d, a.id) })),
     needsYou: items,
@@ -170,14 +172,15 @@ export function threadView(id: number) {
   const d = db();
   const th = d.prepare(`SELECT * FROM threads WHERE id=?`).get(id) as any;
   if (!th) throw new DomainError('not_found', 'no such thread', 404);
-  const messages = d.prepare(`SELECT * FROM messages WHERE thread_id=? ORDER BY id`).all(id);
+  const messages = d.prepare(`SELECT m.*, (SELECT j.kind FROM jobs j WHERE j.id=m.job_id) AS job_kind FROM messages m WHERE m.thread_id=? ORDER BY m.id`).all(id);
   const task = d.prepare(`SELECT * FROM tasks WHERE thread_id=?`).get(id);
   const running = d.prepare(`SELECT agent_id, kind FROM jobs WHERE thread_id=? AND status='running'`).all(id);
   const artifacts = task ? d.prepare(`SELECT id, review_cycle, review_round, verdict, created_at FROM artifacts WHERE task_id=? ORDER BY id`).all((task as any).id) : [];
   // PHASE2 §B2: the director respond job queued by a spawn approval in this thread, until it starts
   const spawn_queued = !!d.prepare(`SELECT 1 FROM jobs j WHERE j.thread_id=? AND j.agent_id='director' AND j.kind='respond' AND j.status='queued' AND j.trigger_message_id IS NULL
     AND EXISTS (SELECT 1 FROM approvals a WHERE a.thread_id=j.thread_id AND a.kind='spend' AND a.status='consumed' AND json_extract(a.payload,'$.action')='spawn_worker')`).get(id);
-  return { thread: th, messages, task, running, artifacts, spawn_queued, preview: th.status === 'open' ? preview(id) : null };
+  const peer_help = task ? (d.prepare(`SELECT count(*) n FROM events WHERE type='help.requested' AND json_extract(payload,'$.task_id')=? AND json_extract(payload,'$.peer')=1`).get((task as any).id) as any).n as number : 0;
+  return { thread: th, messages, task, running, artifacts, spawn_queued, peer_help, preview: th.status === 'open' ? preview(id) : null };
 }
 
 export function taskView(id: number) {

@@ -1,7 +1,7 @@
 import type { DB } from '../db';
 import { now, backoffMs } from '../util';
 import { emit } from './events';
-import { enqueueJob, refreshPresence, PRIORITY, type JobRow } from './jobs';
+import { enqueueJob, refreshPresence, agentRole, PRIORITY, type JobRow } from './jobs';
 import { systemMessage } from './messages';
 import { getTask } from './rounds';
 import { setStatus } from './tasks';
@@ -18,6 +18,12 @@ export type Classified = { rule: string; status: 'succeeded' | 'failed' | 'cance
 const SUBTYPES = ['success', 'error_max_turns', 'error_max_budget_usd', 'error_during_execution'];
 const hasToolCall = (db: DB, jobId: number, tool: string) =>
   !!db.prepare(`SELECT 1 FROM tool_calls WHERE job_id=? AND tool=? AND outcome='ok'`).get(jobId, tool);
+
+/** The `routed_to` of the job's last ok request_help ('director' or a peer id). */
+export function lastOkRequestHelp(db: DB, jobId: number): { routed_to: string } {
+  const r = db.prepare(`SELECT result FROM tool_calls WHERE job_id=? AND tool='request_help' AND outcome='ok' ORDER BY id DESC LIMIT 1`).get(jobId) as { result: string } | undefined;
+  return { routed_to: r ? JSON.parse(r.result).routed_to ?? 'director' : 'director' };
+}
 
 /** Help-end rule (TECH §3.2): a help job ended without handoff and its task is still blocked/help. */
 export function helpEnded(db: DB, job: JobRow): void {
@@ -123,8 +129,16 @@ export function finishAttempt(db: DB, jobId: number, o: Outcome, expectedOwner: 
     const fresh = db.prepare(`SELECT * FROM jobs WHERE id=?`).get(j.id) as JobRow;
     const live = (s: string[]) => task && s.includes(task.status);
     if (c.rule === 'J5+T11' && task) {
-      setStatus(db, task, 'blocked', 'system', { blocked_reason: 'help', help_agent_id: 'director' });   // routed_to: peer help is a later increment
+      const target = lastOkRequestHelp(db, j.id).routed_to;                                          // T11: 'director' or a peer
+      setStatus(db, task, 'blocked', 'system', { blocked_reason: 'help', help_agent_id: target });
+      enqueueJob(db, { agent: target, kind: 'help', thread: task.thread_id, task: task.id, priority: PRIORITY.help });
+      if (target !== 'director') systemMessage(db, task.thread_id, `T-${task.id} blocked: waiting on ${target} (help) · director can see this`);
+    } else if (j.kind === 'help' && c.rule === 'J5' && task && task.status === 'blocked' && task.blocked_reason === 'help'
+        && task.help_agent_id === j.agent_id && agentRole(db, j.agent_id) === 'worker' && hasToolCall(db, j.id, 'request_help')) {   // T11b: a peer escalates to the director
+      db.prepare(`UPDATE tasks SET help_agent_id='director', updated_by='system', updated_at=?, version=version+1 WHERE id=?`).run(now(), task.id);
+      emit(db, 'task.updated', 'system', 'task', task.id, { help_agent_id: 'director' });
       enqueueJob(db, { agent: 'director', kind: 'help', thread: task.thread_id, task: task.id, priority: PRIORITY.help });
+      if (task.assignee_agent_id) refreshPresence(db, task.assignee_agent_id);
     } else if (c.status === 'killed') {
       if ((j.kind === 'work' || j.kind === 'review') && live(['in_progress', 'in_review'])) setStatus(db, task!, 'blocked', 'system', { blocked_reason: 'killed' });
       helpEnded(db, fresh);

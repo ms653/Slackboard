@@ -25,6 +25,7 @@ export function presenceLabel(a: any, now: number, pauseLabel?: string): string 
     const s = Math.max(0, Math.floor((now - a.running_since) / 1000));
     label = `Working · ${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
   }
+  if (a.presence === 'working' && a.helping_asker && a.running_task) label = `Helping ${a.helping_asker} · T-${a.running_task}`;      // peer help job (PHASE2 §B1)
   if (a.presence === 'reviewing' && a.running_task) label = `Reviewing T-${a.running_task}`;
   if (a.presence === 'queued') label = `Queued (${a.queued})`;
   if (a.presence === 'failed' && a.retrying) label = `Failed · Retry ${a.retrying}`;

@@ -3,7 +3,7 @@ import { tx } from '../db';
 import { now, sha256, canonicalJSON, DomainError } from '../util';
 import { emit } from './events';
 import { enqueueJob, PRIORITY, kindSettings, refreshPresence, type JobRow } from './jobs';
-import { insertMessage } from './messages';
+import { insertMessage, systemMessage } from './messages';
 import { getThread, generalChannel } from './threads';
 import { getTask, lastHead } from './rounds';
 import { createTask, applySubmitForReview, approveReview, requestChanges, blockTask, cancelTask, editTask, addNote, unblockTask } from './tasks';
@@ -18,7 +18,7 @@ export const TOOL_SCHEMAS: Record<string, { description: string; inputSchema: Re
   post_message: { description: 'Post a message in a Slackboard thread (defaults to the job thread).', inputSchema: { type: 'object', additionalProperties: false, required: ['body'], properties: {
     body: { type: 'string', minLength: 1, maxLength: 4000 }, thread_id: { type: 'integer' },
     mentions: { type: 'array', items: { type: 'string' }, uniqueItems: true, maxItems: 4 },
-    wake: { type: 'boolean', default: false, description: 'Director only: wake the task assignee (mention it).' }, kind: { enum: ['chat', 'status'], default: 'chat' } } } },
+    wake: { type: 'boolean', default: false, description: 'Director: wake the task assignee (mention it). Peer help job: your single answer to the asker (mention it).' }, kind: { enum: ['chat', 'status'], default: 'chat' } } } },
   create_task: { description: 'Create a task. Without parent_id it is a proposal that needs the user\'s approval.', inputSchema: { type: 'object', additionalProperties: false, required: ['title', 'description', 'acceptance'], properties: {
     title: { type: 'string', minLength: 1, maxLength: 200 }, description: { type: 'string', maxLength: 8000 },
     acceptance: { type: 'string', minLength: 1, maxLength: 4000 }, assignee: { type: 'string' },
@@ -29,9 +29,10 @@ export const TOOL_SCHEMAS: Record<string, { description: string; inputSchema: Re
     description: { type: 'string', maxLength: 8000 }, acceptance: { type: 'string', maxLength: 4000 } } } },
   add_note: { description: 'Record a plan or decision on a task.', inputSchema: { type: 'object', additionalProperties: false, required: ['task_id', 'body'], properties: {
     task_id: { type: 'integer' }, body: { type: 'string', minLength: 1, maxLength: 4000 } } } },
-  request_help: { description: 'Ask for help: worker -> director, director -> user.', inputSchema: { type: 'object', additionalProperties: false, required: ['question'], properties: {
+  request_help: { description: 'Ask for help: worker -> director (or a peer worker with target_agent), director -> user.', inputSchema: { type: 'object', additionalProperties: false, required: ['question'], properties: {
     question: { type: 'string', minLength: 1, maxLength: 2000 }, task_id: { type: 'integer' },
-    options: { type: 'array', items: { type: 'string', maxLength: 200 }, maxItems: 4 } } } },
+    options: { type: 'array', items: { type: 'string', maxLength: 200 }, maxItems: 4 },
+    target_agent: { type: 'string', description: 'Worker work jobs only. Default director.' } } } },
   spawn_worker: { description: 'Ask the user to add a named worker (needs approval; uses allowance). Only when independent tasks are waiting and every worker is busy or unsuited.', inputSchema: { type: 'object', additionalProperties: false, required: ['name', 'skill_note', 'why'], properties: {
     name: { type: 'string', pattern: '^[a-z][a-z0-9_]{1,23}$' }, skill_note: { type: 'string', minLength: 1, maxLength: 500, description: 'What this worker is for; shown to the user and in every prompt.' },
     why: { type: 'string', minLength: 1, maxLength: 500 },
@@ -72,7 +73,7 @@ export function allowedTools(c: Pick<Caller, 'role' | 'kind'>): string[] {
 }
 
 /** Schemas published to the model: generated enums (create_task.assignee, post_message mentions) built per job from the live agent set (PHASE2 §T6). */
-export function publishedTools(db: DB, c: Pick<Caller, 'role' | 'kind'>): { name: string; description: string; inputSchema: any }[] {
+export function publishedTools(db: DB, c: Pick<Caller, 'role' | 'kind'> & { agent?: string }): { name: string; description: string; inputSchema: any }[] {
   const enabled = enabledWorkerIds(db), active = activeWorkerIds(db);
   return allowedTools(c).map((name) => {
     const s = JSON.parse(JSON.stringify(TOOL_SCHEMAS[name]));
@@ -82,6 +83,10 @@ export function publishedTools(db: DB, c: Pick<Caller, 'role' | 'kind'>): { name
       else delete props.assignee;                                                  // never an empty enum
     }
     if (name === 'post_message') props.mentions.items = { enum: ['user', 'director', ...active] };
+    if (name === 'request_help') {
+      if (c.role === 'director') delete props.target_agent;                        // director -> user only (PHASE2 §T6.5)
+      else props.target_agent = { enum: ['director', ...(c.kind === 'work' ? enabled.filter((w) => w !== c.agent) : [])], description: props.target_agent.description };
+    }
     return { name, ...s };
   });
 }
@@ -147,16 +152,22 @@ function dispatch(db: DB, c: Caller, tool: string, input: any, pre: { cap?: Capt
         if (c.role !== 'director' || (task && task.status !== 'done')) return rej('cannot_address_user', 'use request_help');
       }
       const wakeTask = input.wake ? db.prepare(`SELECT * FROM tasks WHERE thread_id=?`).get(threadId) as any : undefined;
+      const peerHelper = c.role === 'worker' && c.kind === 'help';                                  // PHASE2 §T6.3
       if (input.wake) {
-        if (c.role !== 'director') return rej('validation_error', 'wake is director-only');
+        if (c.role !== 'director' && !peerHelper) return rej('validation_error', 'wake is director-only (or a peer help job answering its asker)');
         if (!mentions.some((m) => m !== 'user' && m !== 'director')) return rej('validation_error', 'wake needs mentions:[<the task assignee>]');
         if (wakeTask && !mentions.includes(wakeTask.assignee_agent_id)) return rej('wrong_agent', `wake only the task assignee (${wakeTask.assignee_agent_id})`);
+        if (peerHelper && !wakeTask) return rej('wrong_agent', 'a peer help job wakes only the asker of its task');
       }
       const id = insertMessage(db, { thread: threadId, authorKind: 'agent', agent: c.agent, kind: input.kind ?? 'chat', body: input.body, mentions, wakes: !!input.wake, jobId: c.jobId });
       if (input.wake) {
         const task = wakeTask;
-        if (task && task.status === 'blocked' && task.blocked_reason === 'help') unblockTask(db, task, c.agent, 'reply', { clean: true, head: null });
-        else if (task && !['done', 'cancelled'].includes(task.status) && task.assignee_agent_id)
+        const mayResume = !peerHelper || (task?.status === 'blocked' && task.blocked_reason === 'help' && task.help_agent_id === c.agent);
+        if (task && task.status === 'blocked' && task.blocked_reason === 'help' && mayResume) {
+          unblockTask(db, task, c.agent, 'reply', { clean: true, head: null });
+          if (peerHelper) systemMessage(db, threadId, `${c.agent} answered; ${task.assignee_agent_id} resumes T-${task.id}`);
+        }
+        else if (!peerHelper && task && !['done', 'cancelled'].includes(task.status) && task.assignee_agent_id)
           enqueueJob(db, { agent: task.assignee_agent_id, kind: 'respond', thread: threadId, task: task.id, trigger: id, priority: PRIORITY.directorWake, actor: c.agent });
       }
       return { ok: true, message_id: id };
@@ -209,14 +220,29 @@ function dispatch(db: DB, c: Caller, tool: string, input: any, pre: { cap?: Capt
       return { ok: true, note_id: addNote(db, t.id, c.agent, input.body) };
     }
     case 'request_help': {
+      const target: string | undefined = input.target_agent;
+      // dispatch order (PHASE2 §T6): director+target -> validation_error; unknown id -> unknown_agent; peer from a non-work worker job -> not_allowed_for_role; guards
+      if (c.role === 'director' && target !== undefined) return rej('validation_error', 'the director asks the user; omit target_agent');
+      const peer = target !== undefined && target !== 'director';
+      if (peer && !activeWorkerIds(db).includes(target!)) return rej('unknown_agent', `target_agent must be director or an active worker (${activeWorkerIds(db).join(', ')})`);
+      if (peer && c.kind !== 'work') return rej('not_allowed_for_role', c.kind === 'help' ? 'peers can only escalate to the director' : 'only a work job can ask a peer');
       const taskId = input.task_id ?? c.taskId;
+      if (peer) {
+        if (target === c.agent || !enabledWorkerIds(db).includes(target!)) return rej('unknown_agent', `${target} cannot be asked now; omit target_agent to ask the director`);
+        if (!taskId) return rej('validation_error', 'peer help needs a task');
+        const used = (db.prepare(`SELECT count(*) n FROM events WHERE type='help.requested' AND json_extract(payload,'$.task_id')=? AND json_extract(payload,'$.peer')=1`).get(taskId) as any).n;
+        if (used >= 2) return rej('help_cap', 'omit target_agent to ask the director');
+        const pair = (db.prepare(`SELECT count(*) n FROM events WHERE type='help.requested' AND actor=? AND json_extract(payload,'$.routed_to')=? AND json_extract(payload,'$.peer')=1 AND ts >= ?`).get(c.agent, target, now() - 86_400_000) as any).n;
+        if (pair >= 3) return rej('help_cap', 'omit target_agent to ask the director');
+      }
       const open = taskId ? (db.prepare(`SELECT count(*) AS n FROM messages m JOIN tasks t ON t.thread_id=m.thread_id WHERE t.id=? AND m.kind='help'
                      AND NOT EXISTS (SELECT 1 FROM messages u WHERE u.thread_id=m.thread_id AND u.id>m.id AND u.author_kind<>'system' AND u.author_agent_id IS NOT m.author_agent_id)`).get(taskId) as any).n : 0;
       if (open >= 2) return rej('validation_error', 'max 2 open help requests per task');
       const opts = input.options?.length ? '\n' + input.options.map((o: string, i: number) => `${i + 1}. ${o}`).join('\n') : '';
-      const to = c.role === 'director' ? 'user' : 'director';
-      const id = insertMessage(db, { thread: c.threadId, authorKind: 'agent', agent: c.agent, kind: 'help', body: input.question + opts, mentions: [to], jobId: c.jobId });
-      emit(db, 'help.requested', c.agent, 'message', id, { routed_to: to, task_id: taskId ?? null, options: input.options ?? [] }, c.jobId);
+      const to = c.role === 'director' ? 'user' : peer ? target! : 'director';
+      const id = insertMessage(db, { thread: c.threadId, authorKind: 'agent', agent: c.agent, kind: 'help', body: input.question + opts,
+        mentions: peer ? [to, 'director'] : [to], jobId: c.jobId });
+      emit(db, 'help.requested', c.agent, 'message', id, { routed_to: to, task_id: taskId ?? null, options: input.options ?? [], ...(peer ? { peer: 1 } : {}) }, c.jobId);
       const asked = taskId ? getTask(db, taskId) : undefined;
       if (asked?.assignee_agent_id) refreshPresence(db, asked.assignee_agent_id);       // the asker's label depends on who got the question
       return { ok: true, message_id: id, routed_to: to };

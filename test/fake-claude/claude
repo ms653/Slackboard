@@ -36,6 +36,11 @@ const job = (() => {
   const assignee = (prompt.match(/<task id="T-\d+"[^>]*\bassignee="(\w*)"/) || [])[1] || 'worker';
   return m ? { id: +m[1], kind: m[2], agent: m[3], role, assignee, attempt: +m[4], task: m[5] ? +m[5] : null, thread: +m[6], round: m[7] ? +m[7] : 0 } : null;
 })();
+if (job && job.kind === 'help' && job.role === 'worker' && /(^|[,\s])(Write|Edit)(\(|[,\s]|$)/.test(flag('--allowedTools') || '')) die('a worker help job must not allow Write/Edit');
+if (process.env.SB_FAKE_STATE && job) {                                                              // test hook: what this run was started with
+  fs.mkdirSync(process.env.SB_FAKE_STATE, { recursive: true });
+  fs.writeFileSync(path.join(process.env.SB_FAKE_STATE, `job-${job.id}.json`), JSON.stringify({ cwd: process.cwd(), allowed: flag('--allowedTools'), kind: job.kind, agent: job.agent }));
+}
 const lastUser = (() => { const all = [...prompt.matchAll(/<user_message id="\d+"[^>]*>([\s\S]*?)<\/user_message>/g)]; return all.length ? all[all.length - 1][1] : ''; })();
 const unesc = (s) => s.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&amp;/g, '&');
 
@@ -60,6 +65,8 @@ function defaultSteps(j) {
     { tool: { name: 'post_message', input: { body: `T-${j.task} is done and reviewed: OUTPUT.md in the task workspace.`, mentions: ['user'] } } }];
   if (j.role === 'director' && j.kind === 'help') return [
     { tool: { name: 'post_message', input: { body: 'Use Markdown. Go ahead.', mentions: [j.assignee], wake: true } } }];
+  if (j.role === 'worker' && j.kind === 'help') return [                                            // peer help: answer the asker once, with a wake
+    { tool: { name: 'post_message', input: { body: 'Peer answer: use the existing style.', mentions: [j.assignee], wake: true } } }];
   return [{ say: 'nothing to do' }];
 }
 
@@ -68,6 +75,8 @@ function scriptSteps(j) {
   const s = JSON.parse(fs.readFileSync(file, 'utf8'));
   const joined = /joined \(approved by you\)/.test(prompt) ? [`${j.agent}:${j.kind}:joined:a${j.attempt}`, `${j.agent}:${j.kind}:joined`] : [];   // a director run woken by a spawn approval
   const keys = [...joined, `${j.agent}:${j.kind}:a${j.attempt}:r${j.round}`, `${j.agent}:${j.kind}:r${j.round}`, `${j.agent}:${j.kind}:a${j.attempt}`, `${j.agent}:${j.kind}`];
+  // a worker run resumed after someone else answered it in the thread (peer help or director): `agent:kind:answered`
+  if (j.role === 'worker' && j.kind === 'work' && new RegExp(`<untrusted kind="agent_message" author="(?!${j.agent}")\\w+"`).test(prompt)) keys.unshift(`${j.agent}:${j.kind}:answered`);
   for (const k of keys) if (s[k]) return s[k];
   return null;
 }

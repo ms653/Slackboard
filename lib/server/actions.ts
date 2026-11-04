@@ -4,7 +4,7 @@ import { now, DomainError } from '../util';
 import { emit } from '../domain/events';
 import { getTask } from '../domain/rounds';
 import { workspaceFacts } from '../domain/git';
-import { createTask, decideApproval, cancelTask, reopenTask, acceptTask, unblockTask, reassignTask } from '../domain/tasks';
+import { createTask, decideApproval, cancelTask, reopenTask, acceptTask, unblockTask, reassignTask, rerouteHelp } from '../domain/tasks';
 import { createWorkerByUser, setEnabled, retireAgent, setAgentBudget, setMaxConcurrency, ensureAgentDir } from '../domain/agents';
 import { closeThread, reopenThread, raiseCap, createThread } from '../domain/threads';
 import { postUserMessage, wakePreview } from '../domain/wake';
@@ -57,6 +57,7 @@ export function taskAction(id: number, action: string, note?: string, assignee?:
       case 'reassign':
         if (typeof assignee !== 'string') throw new DomainError('validation_error', 'assignee is required', 400);
         reassignTask(d, t, assignee); return {};
+      case 'reroute_help': rerouteHelp(d, t); return {};
       case 'unblock': return { target: unblockTask(d, t, 'user', 'retry', ws!, note) };
       default: throw new DomainError('validation_error', `unknown action ${action}`, 400);
     }

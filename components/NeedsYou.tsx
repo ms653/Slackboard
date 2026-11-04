@@ -60,7 +60,7 @@ export function NeedsYou() {
         ? <><div>New worker &ldquo;{p.name}&rdquo; · model {p.model}</div>
             <div>Skill: &ldquo;{p.skill_note}&rdquo;</div>
             <div className="text-slate-300">Why: {a.summary}</div>
-            <div className="text-slate-300">From: #general{n.origin?.user_message ? ` · you: "${n.origin.user_message}"` : ''}</div>
+            <div className="text-slate-300">From: {n.origin?.thread_title || `thread ${a.thread_id}`}{n.origin?.user_message ? ` · you: "${n.origin.user_message}"` : ''}</div>
             <div>Allowance: up to {usd(p.daily_usd)} est./day (≈ {Math.floor(p.daily_usd / 1.0)} work runs/day), {p.daily_jobs} runs/day</div>
             <div className="text-slate-400 text-xs">Shares your daily caps: {usd(boot.usage.limit_usd_day)} est., {boot.usage.limit_jobs_day} runs/day, {boot.usage.limit_jobs_5h} per 5 h</div>
             <div className="text-slate-400 text-xs">Workers: {activeWorkers} → {activeWorkers + 1} of 3 · Run slots: {maxc} ({Math.max(1, maxc - 1)} for workers, {maxc > 1 ? 1 : 0} kept for director)</div>
@@ -144,7 +144,7 @@ export function NeedsYou() {
     } else if (n.item_type === 'failure') {
       const lj = n.lastJob;
       const hfailed = task?.reason?.includes('help failed');
-      body = <><div>{hfailed ? `director could not answer T-${task.id}'s help request` : `${lj?.agent_id ?? 'agent'} failed on T-${task.id}`}: {lj?.failure_kind ?? task?.reason}</div>
+      body = <><div>{hfailed ? `${lj?.agent_id ?? 'director'} could not answer T-${task.id}'s help request` : `${lj?.agent_id ?? 'agent'} failed on T-${task.id}`}: {lj?.failure_kind ?? task?.reason}</div>
         <div className="text-slate-300">&ldquo;{task.title}&rdquo;</div></>;
       actions = <>
         <ActionButton label="Retry" kind="primary" run={async () => { const r = await act(() => api(`/api/tasks/${task.id}`, { body: { action: 'unblock' } })); toast(retryToast(r, task.id)); }} />

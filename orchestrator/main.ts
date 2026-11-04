@@ -7,7 +7,7 @@ import { emit } from '@/lib/domain/events';
 import { claimNext, cancelDeadQueuedJobs, budgetBlocked, agentBudgetHits } from '@/lib/domain/claim';
 import { finishAttempt } from '@/lib/domain/finish';
 import { refreshAllPresence, type JobRow } from '@/lib/domain/jobs';
-import { expireApprovals, setStatus } from '@/lib/domain/tasks';
+import { expireApprovals, setStatus, rerouteStalePeerHelp, peerHelpNotices } from '@/lib/domain/tasks';
 import { getTask } from '@/lib/domain/rounds';
 import { procStart, isOurs, killJobProcs, procTargets, sweepByMarker, killGroup, setArgvFallback, groupAlive } from '@/lib/proc';
 import { startToolServer, Tokens } from './toolserver';
@@ -72,7 +72,8 @@ function tick(): void {
       log(`claimed job ${job.id} (${job.agent_id} ${job.kind}${job.task_id ? ' T-' + job.task_id : ''}, attempt ${job.attempts})`);
       spawnJob(ctx, job, token);
     }
-    tx(db, () => { agentBudgetHits(db); refreshAllPresence(db); });          // PHASE2 §T5.1: per-agent budget.hit (daily dedup) + presence labels
+    tx(db, () => { agentBudgetHits(db); refreshAllPresence(db); });
+    try { tx(db, () => peerHelpNotices(db)); } catch (e: any) { log('peer help notice error', e.message); }          // PHASE2 §T5.1: per-agent budget.hit (daily dedup) + presence labels
     const why = budgetBlocked(db);
     if (why && now() - lastBudgetHit > 600_000 && db.prepare(`SELECT 1 FROM jobs WHERE status='queued'`).get()) {
       lastBudgetHit = now(); emit(db, 'budget.hit', 'system', 'budget', null, { reason: why }); refreshAllPresence(db);
@@ -100,6 +101,7 @@ async function sweep(): Promise<void> {
                                 AND NOT EXISTS (SELECT 1 FROM jobs WHERE task_id=tasks.id AND status='running')`).all(now()) as { id: number }[];
       for (const t of stale) setStatus(db, getTask(db, t.id)!, 'todo', 'system');                 // T9
       expireApprovals(db);
+      rerouteStalePeerHelp(db);                                                                    // T11c
     });
     const orphans = db.prepare(`SELECT * FROM jobs WHERE status='running' AND lease_expires_at < ?`).all(now()) as JobRow[];
     for (const j of orphans) {

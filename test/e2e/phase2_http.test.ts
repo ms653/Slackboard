@@ -91,4 +91,26 @@ describe('Phase 2 HTTP surface (PHASE2 §T5.5)', () => {
     r = await call('PUT', '/api/agents/worker', { retire: true });
     expect(r.json.error).toBe('agent_has_open_tasks');                                         // the reassigned task is still open; last_worker is checked after
   });
+  it('POST /api/tasks/:id reroute_help: 409 help_running while the peer job runs, 200 when queued, 409 afterwards (T11c)', async () => {
+    let r = await call('POST', '/api/agents', { name: 'peer2', skill_note: 'x', daily_usd: 1.0, daily_jobs: 5 });
+    expect(r.status).toBe(200);
+    await call('PUT', '/api/agents/worker', { enabled: true });
+    r = await call('POST', '/api/tasks', { title: 'asker', assignee: 'worker' });
+    const tid = r.json.task_id;
+    const th = env.one(`SELECT thread_id t FROM tasks WHERE id=?`, tid).t;
+    env.db.prepare(`UPDATE jobs SET status='cancelled', finished_at=1 WHERE task_id=?`).run(tid);
+    env.db.prepare(`UPDATE tasks SET status='in_progress', claimed_by='worker', claim_expires_at=? WHERE id=?`).run(Date.now() + 60000, tid);
+    env.db.prepare(`UPDATE tasks SET status='blocked', claimed_by=NULL, claim_expires_at=NULL, blocked_reason='help', help_agent_id='peer2' WHERE id=?`).run(tid);
+    const jid = Number(env.db.prepare(`INSERT INTO jobs(agent_id,kind,thread_id,task_id,status,run_after,budget_cap_usd,created_at,lease_owner,lease_expires_at,started_at,attempts)
+      VALUES ('peer2','help',?,?,'running',1,0.3,?,'x',?,?,1)`).run(th, tid, Date.now(), Date.now() + 60000, Date.now()).lastInsertRowid);
+    r = await call('POST', `/api/tasks/${tid}`, { action: 'reroute_help' });
+    expect([r.status, r.json.error]).toEqual([409, 'help_running']);
+    expect(env.one(`SELECT help_agent_id h FROM tasks WHERE id=?`, tid).h).toBe('peer2');
+    env.db.prepare(`UPDATE jobs SET status='queued', lease_owner=NULL, lease_expires_at=NULL, started_at=NULL, attempts=0 WHERE id=?`).run(jid);
+    r = await call('POST', `/api/tasks/${tid}`, { action: 'reroute_help' });
+    expect(r.status).toBe(200);
+    expect(r.json.task).toMatchObject({ help_agent_id: 'director', blocked_reason: 'help' });
+    r = await call('POST', `/api/tasks/${tid}`, { action: 'reroute_help' });
+    expect([r.status, r.json.error]).toEqual([409, 'illegal_transition']);
+  });
 });

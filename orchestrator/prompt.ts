@@ -43,7 +43,7 @@ export function renderPrompt(db: DB, j: JobRow, reason: string | null): string {
     parts.unshift(`<retry attempt="${j.attempts}">Your previous run was interrupted. Tool calls you already made are recorded; repeating one returns its original result. Re-check the context, then continue.</retry>`);
   if (reason === 'max_turns') parts.unshift(`<continue>You hit the turn limit. In at most 3 tool calls, finish: submit_for_review, request_help, or update_task block.</continue>`);
   if (reason === 'no_handoff') parts.unshift(`<continue>You ended without a handoff. Do exactly one of: submit_for_review, request_help, update_task block.</continue>`);
-  parts.push(`<instructions>${instructions(j, t)}</instructions>`);
+  parts.push(`<instructions>${instructions(db, j, t)}</instructions>`);
   let out = parts.join('\n');
   if (out.length > MAX) out = out.slice(0, MAX - 200) + '\n[context truncated]\n' + parts[parts.length - 1];
   return out;
@@ -57,9 +57,11 @@ export function team(db: DB): string {
   return `<team>\n${lines.join('\n')}\n</team>`;
 }
 
-function instructions(j: JobRow, t: ReturnType<typeof getTask>): string {
+function instructions(db: DB, j: JobRow, t: ReturnType<typeof getTask>): string {
   if (j.kind === 'review' && t) return `Review T-${t.id} round ${t.review_round} of 2 against the acceptance criteria. End with update_task approve or request_changes.`;
   if (j.kind === 'work' && t) return `Do T-${t.id} in your working directory. End with exactly one handoff: update_task submit_for_review, request_help, or update_task block.`;
+  if (j.kind === 'help' && t && agentRole(db, j.agent_id) === 'worker')               // peer help (PHASE2 §T4.3)
+    return `${t.assignee_agent_id} asked you (${j.agent_id}) for help on T-${t.id}. You may Read files here; you cannot edit. Answer once with post_message {wake:true, mentions:["${t.assignee_agent_id}"]}. If you cannot answer, call request_help (it goes to the director). Post nothing else.`;
   if (j.kind === 'help' && t) return `The worker asked for help on T-${t.id}. Answer with post_message (wake: true, mentions ["${t.assignee_agent_id}"]), or escalate with request_help to the user.`;
   return `Respond to the latest message in thread ${j.thread_id}. Create a task if work is needed; otherwise answer with post_message. Post nothing if nothing needs saying.`;
 }

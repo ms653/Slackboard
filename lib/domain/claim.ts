@@ -84,6 +84,9 @@ export function agentBudgetHits(db: DB, t = now()): string[] {
 /** Housekeeping before claims: J4 (dead tasks) and J3 (thread job cap). */
 export function cancelDeadQueuedJobs(db: DB): void {
   cancelQueued(db, `task_id IN (SELECT id FROM tasks WHERE status IN ('cancelled','done'))`, [], 'task_not_claimable');
+  // PHASE2 §J4: a queued peer help job whose task no longer waits on that peer (NULL-safe: IS NOT)
+  cancelQueued(db, `kind = 'help' AND (SELECT a.role FROM agents a WHERE a.id = jobs.agent_id) <> 'director' AND EXISTS (
+      SELECT 1 FROM tasks k WHERE k.id = jobs.task_id AND (k.status <> 'blocked' OR k.blocked_reason IS NOT 'help' OR k.help_agent_id IS NOT jobs.agent_id))`, [], 'task_not_claimable');
   const capped = db.prepare(`SELECT DISTINCT t.id FROM jobs j JOIN threads t ON t.id=j.thread_id
                              WHERE j.status='queued' AND t.status='open' AND t.agent_job_count >= t.max_agent_jobs`).all() as { id: number }[];
   for (const c of capped) capThreadForJobs(db, c.id);

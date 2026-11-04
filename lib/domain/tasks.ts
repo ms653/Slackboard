@@ -9,6 +9,7 @@ import { insertMessage, systemMessage } from './messages';
 import { createThread, closeThread, reopenThread, getThread } from './threads';
 import { getTask, currentArtifact, resumeTarget, type TaskRow } from './rounds';
 import { ensureWorkspace, type WorkspaceFacts, type Capture } from './git';
+import { queueReason } from './claim';
 import { fewestOpenWorker, enabledWorkerIds, parseSpawnPayload, nameTaken, activeWorkerIds, insertWorker, ensureAgentDir, setMaxConcurrency, MAX_WORKERS } from './agents';
 
 /** Update status with bookkeeping; the DB triggers are the backstop (tasks_legal_transition etc). */
@@ -270,6 +271,7 @@ export function unblockTask(db: DB, t: TaskRow, actor: string, via: 'retry' | 'r
     extra.review_round = t.review_round - 1;
   }
   setStatus(db, t, rt.status, actor, extra);
+  cancelQueued(db, `task_id = ? AND kind = 'help'`, [t.id], 'cancelled');                          // T16: leaving blocked drops queued help; the help-end rule cannot fire (task no longer blocked/help)
   enqueueJob(db, { agent: rt.agent, kind: rt.kind, thread: t.thread_id, task: t.id,
                    priority: rt.kind === 'review' ? PRIORITY.review : PRIORITY.work, actor });
   if (t.assignee_agent_id) refreshPresence(db, t.assignee_agent_id);
@@ -318,4 +320,50 @@ export function reassignTask(db: DB, t: TaskRow, assignee: string): void {
   emit(db, 'task.updated', 'user', 'task', t.id, { assignee, from: old });
   if (t.status === 'todo') enqueueJob(db, { agent: assignee, kind: 'work', thread: t.thread_id, task: t.id, actor: 'user' });
   if (old) refreshPresence(db, old);
+}
+
+/** The queued/running peer `help` job a blocked/help task waits on (help_agent_id is a worker), if any. */
+export function peerHelpJob(db: DB, t: Pick<TaskRow, 'id' | 'status' | 'blocked_reason' | 'help_agent_id'>): { id: number; agent_id: string; status: string; created_at: number } | undefined {
+  if (t.status !== 'blocked' || t.blocked_reason !== 'help' || !t.help_agent_id || t.help_agent_id === 'director') return undefined;
+  return db.prepare(`SELECT id, agent_id, status, created_at FROM jobs WHERE task_id=? AND kind='help' AND agent_id=? AND status IN ('queued','running') ORDER BY id DESC LIMIT 1`)
+    .get(t.id, t.help_agent_id) as any;
+}
+
+/** T11c: the task stops waiting on a peer that cannot answer and asks the director instead (one txn, the caller's). No help-end rule. */
+export function rerouteHelp(db: DB, t: TaskRow): void {
+  const pj = peerHelpJob(db, t);
+  if (!pj) throw new DomainError('illegal_transition', 'this task is not waiting on a peer helper', 409);
+  if (pj.status === 'running') throw new DomainError('help_running', `${pj.agent_id} is answering right now`, 409);
+  const peer = pj.agent_id;
+  const why = queueReason(db, peer) ?? 'not started';
+  cancelQueued(db, 'id = ?', [pj.id], 'cancelled', 'system');
+  db.prepare(`UPDATE tasks SET help_agent_id='director', updated_at=?, version=version+1 WHERE id=?`).run(now(), t.id);
+  emit(db, 'task.updated', 'system', 'task', t.id, { help_agent_id: 'director' });
+  enqueueJob(db, { agent: 'director', kind: 'help', thread: t.thread_id, task: t.id, priority: PRIORITY.help });
+  systemMessage(db, t.thread_id, `${peer} can't answer now (${why}); asking the director instead.`);
+  if (t.assignee_agent_id) refreshPresence(db, t.assignee_agent_id);
+  refreshPresence(db, peer);
+}
+
+/** Sweep (same tick as approval expiry): reroute peer help queued >= 10 min (from jobs.created_at) or whose peer is disabled/retired. Not while kill is engaged. */
+export function rerouteStalePeerHelp(db: DB): number {
+  if ((db.prepare(`SELECT kill_switch FROM system_state WHERE id=1`).get() as { kill_switch: number }).kill_switch) return 0;
+  const rows = db.prepare(`SELECT t.id FROM tasks t JOIN jobs j ON j.task_id=t.id AND j.kind='help' AND j.agent_id=t.help_agent_id AND j.status='queued'
+      JOIN agents a ON a.id=j.agent_id
+    WHERE t.status='blocked' AND t.blocked_reason='help' AND a.role='worker' AND (? - j.created_at >= 600000 OR a.enabled=0 OR a.retired_at IS NOT NULL)`).all(now()) as { id: number }[];
+  for (const r of rows) rerouteHelp(db, getTask(db, r.id)!);
+  return rows.length;
+}
+
+/** B3: one system line "<peer> hasn't started: <reason>" per reason change while a peer help job waits (not for plain run slots). */
+export function peerHelpNotices(db: DB): void {
+  for (const j of db.prepare(`SELECT j.agent_id, j.created_at, t.thread_id FROM jobs j JOIN tasks t ON t.id=j.task_id AND t.help_agent_id=j.agent_id
+      WHERE j.kind='help' AND j.status='queued' AND t.status='blocked' AND t.blocked_reason='help' AND j.agent_id<>'director'`).all() as { agent_id: string; created_at: number; thread_id: number }[]) {
+    const why = queueReason(db, j.agent_id);
+    if (!why || why.startsWith('run slots')) continue;
+    const body = `${j.agent_id} hasn't started: ${why}`;
+    const last = db.prepare(`SELECT body FROM messages WHERE thread_id=? AND author_kind='system' AND created_at >= ? AND body LIKE ? ORDER BY id DESC LIMIT 1`)
+      .get(j.thread_id, j.created_at, `${j.agent_id} hasn't started: %`) as { body: string } | undefined;
+    if (last?.body !== body) systemMessage(db, j.thread_id, body);
+  }
 }
