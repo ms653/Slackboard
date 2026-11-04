@@ -1,6 +1,6 @@
 # Slackboard Phase 2 design (delta)
 
-Status: Phase 2 Round 4 draft. This is a delta against the shipped MVP docs: `PRD.md`, `UX.md`, `TECH.md`. Anything not mentioned here is unchanged. Section refs like "TECH §5.3" point into those docs. Scope covers TECH §12 items 1–3 only.
+Status: Phase 2 Round 5 draft. This is a delta against the shipped MVP docs: `PRD.md`, `UX.md`, `TECH.md`. Anything not mentioned here is unchanged. Section refs like "TECH §5.3" point into those docs. Scope covers TECH §12 items 1–3 only.
 
 Code facts this delta builds on (read from the repo, not from the docs):
 - `'worker'` is hardcoded in `lib/domain/tools.ts` (`post_message` wake, mentions enum, `create_task` assignee enum), `tasks.ts` (`createTask` default, `unblockTask` presence), `rounds.ts` (`resumeTarget` fallback), `wake.ts` (`@(director|worker)` parse) and `prompts/worker.md`. Every one of these becomes "the task's assignee" or "an active worker id".
@@ -354,8 +354,8 @@ END;
 
 -- ── tasks: assignee must be an active worker; who is answering a help request ──
 ALTER TABLE tasks ADD COLUMN help_agent_id TEXT REFERENCES agents(id);
--- v1 help always went to the director. job_failed only when help failed (helpFailed: newest failed/killed/cancelled job is a help job).
-UPDATE tasks SET help_agent_id='director' WHERE status='blocked' AND (blocked_reason='help' OR (blocked_reason='job_failed' AND (SELECT kind FROM jobs WHERE task_id=tasks.id AND finished_at IS NOT NULL AND status IN ('failed','killed','cancelled') ORDER BY id DESC LIMIT 1)='help'));
+-- v1 help always went to the director. job_failed only when help failed (TECH §3.1 helpFailed: the newest finished job is a help job with status failed/killed/cancelled).
+UPDATE tasks SET help_agent_id='director' WHERE status='blocked' AND (blocked_reason='help' OR (blocked_reason='job_failed' AND (SELECT kind='help' AND status IN ('failed','killed','cancelled') FROM jobs WHERE task_id=tasks.id AND finished_at IS NOT NULL ORDER BY id DESC LIMIT 1) = 1));
 
 CREATE TRIGGER tasks_assignee_active_ins BEFORE INSERT ON tasks
 WHEN NEW.assignee_agent_id IS NOT NULL AND NOT EXISTS (
@@ -426,7 +426,7 @@ Notes:
 - `ALTER … ADD COLUMN … REFERENCES` is legal because the default is NULL.
 - After `migrate()`, `PRAGMA foreign_key_check` must return no rows (unit test).
 - Existing tasks all have assignee `worker`, which is an active worker, so the new triggers accept all v1 data.
-- v1 `blocked/help` tasks and help-failed `blocked/job_failed` tasks (TECH `helpFailed` predicate: the task's newest `failed`/`killed`/`cancelled` job is a `help` job; succeeded jobs are ignored) are backfilled `help_agent_id = 'director'` (v1 help only went to the director), so B1 labels, T11b/T16, the help-end rule and J4 see a non-NULL helper. A `job_failed` task whose work/review failed (T10, never asked for help) stays NULL.
+- v1 `blocked/help` tasks and help-failed `blocked/job_failed` tasks (TECH §3.1 `helpFailed` predicate, word for word: the task's newest finished job is a `help` job with status `failed`/`killed`/`cancelled`) are backfilled `help_agent_id = 'director'` (v1 help only went to the director), so B1 labels, T11b/T16, the help-end rule and J4 see a non-NULL helper. A `job_failed` task whose work/review failed (T10, never asked for help) stays NULL.
 
 **Validation:** `test/migrations/validate_v2.py` (in repo) loads `SCHEMA_SQL` from `lib/db/schema.ts`, seeds v1 data (incl. blocked `help`/`killed` tasks, a help-failed `job_failed` task, a work-failed `job_failed` task, and a work-failed `job_failed` task whose newest finished job is a *succeeded* help (task 14, stays NULL), with their finished jobs), applies this block (extracted from this file between the `MIGRATION 2` markers), then asserts each trigger, the `help_agent_id` backfill and the `tool_calls` row carry-over. Run: `python3 -I test/migrations/validate_v2.py /home/user/Slackboard`. Status: Round 4 block and fixtures executed green (`sqlite 3.53.1` / `OK: migration 2 validated`). Any later edit to it must be re-validated (release gate, §T9).
 
@@ -534,6 +534,7 @@ for b in SELECT agent_id, limit_usd, limit_jobs FROM budgets WHERE scope='agent'
 - `queueReason(agent)` evaluates the same predicates one by one for the UI (§B1), in this order: `disabled`, `busy (running T-n)` (one-running-per-agent), `run slots n/max`, `director slot reserved`, `daily budget` / `job cap` (global), `agent budget` (either `@agentRoom` predicate), `thread capped`. First failing predicate wins.
 - `refreshPresence` sets `paused` with detail `agent budget` when the agent has a queued job, no running job, and fails only the per-agent predicate.
 - `budget.hit {scope:'agent', agent}` is emitted once per agent per day as a `budget.hit` event (existing type), in the same txn as the §B1 budget-hit system line (thread of the agent's first queued job's task).
+- **Retry on a help-failed task (MVP `resumeTarget` case 0, `lib/domain/tasks.ts` `unblockTask`):** the raw `UPDATE tasks SET blocked_reason='help'` also sets `help_agent_id='director'` in the same statement (failed peer help is always retried on the director, §T3.2), so the J4 peer filter and the claim predicate never see NULL. The thread-wide `escalated` flag in `lib/server/read.ts` is replaced by `helpEscalatedToUser`.
 - **`helpEscalatedToUser(task)`** (`lib/domain/tasks.ts`, the single definition used by the card line, `refreshPresence` and bootstrap): true iff the task is `blocked/help` and the newest `kind='help'` message in the task thread with `created_at ≥ entered` has `'user'` in `mentions`, where `entered` = the latest `ts` of the task's `task.status_changed {to:'blocked', reason:'help'}` or `task.updated {blocked_reason:'help'}` (Retry case 0) event. Help messages from before the current blocked/help episode never count.
 - `refreshPresence` for an agent with no running and no queued job and a task `blocked/help` with `help_agent_id` set: `blocked` (detail "waiting on you") if `helpEscalatedToUser(task)`, else `idle`, detail `waiting on <help_agent_id> · T-n`.
 
@@ -695,7 +696,7 @@ Event `help.requested {routed_to, task_id, options, peer}`. Returns `{ok, messag
   - fresh DB → `user_version = 2`;
   - a v1 DB with rows in every table (incl. 3 `tool_calls`) → v2 with the same `tool_calls` rows, `PRAGMA foreign_key_check` empty, `journal_mode = wal`, `foreign_keys = 1`;
   - running `migrate()` twice is a no-op;
-  - v1 `blocked/help` and help-failed `blocked/job_failed` tasks → `help_agent_id = 'director'`; a work-failed `blocked/job_failed` task (newest failed/killed/cancelled job is `work`, even if a later help job succeeded) and other tasks stay NULL;
+  - v1 `blocked/help` and help-failed `blocked/job_failed` tasks → `help_agent_id = 'director'`; a `blocked/job_failed` task whose newest finished job is not a failed/killed/cancelled `help` job (e.g. newest is a failed `work` job, or an older failed `help` followed by a newer succeeded job) and other tasks stay NULL;
   - `test/migrations/validate_v2.py` (§T1) runs against the DDL block in this doc; CI/release runs it with `python3 -I test/migrations/validate_v2.py <repo>` and requires `OK: migration 2 validated`.
 - **Triggers:**
   - 4th active worker → `worker_cap`, while a 4th after retiring one is ok;
