@@ -147,7 +147,7 @@ export function NeedsYou() {
       body = <><div>{hfailed ? `${lj?.agent_id ?? 'director'} could not answer T-${task.id}'s help request` : `${lj?.agent_id ?? 'agent'} failed on T-${task.id}`}: {lj?.failure_kind ?? task?.reason}</div>
         <div className="text-slate-300">&ldquo;{task.title}&rdquo;</div></>;
       actions = <>
-        <ActionButton label="Retry" kind="primary" run={async () => { const r = await act(() => api(`/api/tasks/${task.id}`, { body: { action: 'unblock' } })); toast(retryToast(r, task.id)); }} />
+        <ActionButton label={hfailed && lj && lj.agent_id !== 'director' ? 'Retry via director' : 'Retry'} kind="primary" run={async () => { const r = await act(() => api(`/api/tasks/${task.id}`, { body: { action: 'unblock' } })); toast(retryToast(r, task.id)); }} />
         <ActionButton label="Cancel task" kind="danger" run={async () => confirmCancel(task.id)} />
         {lj && <button className="btn bg-slate-700" onClick={() => open({ kind: 'log', id: lj.id })}>Open log</button>}</>;
     } else if (n.item_type === 'thread_capped') {

@@ -37,7 +37,7 @@ function PaneShell({ title, children, footer }: { title: React.ReactNode; childr
 }
 
 /** System line text plus inline real buttons: [Edit budget], [Raise cap]/[Reopen thread] (director not woken), [Ask the director instead] (peer hasn't started). */
-function SystemBody({ body, thread, task, lastPeerLine }: { body: string; thread: any; task: any; lastPeerLine: boolean }) {
+function SystemBody({ body, thread, task, lastPeerLine, peerQueued }: { body: string; thread: any; task: any; lastPeerLine: boolean; peerQueued: boolean }) {
   const { openSettingsAgent, refresh, toast } = useStore();
   const agent = budgetHitAgent(body);
   const btn = 'ml-1 underline text-sky-300';
@@ -47,11 +47,11 @@ function SystemBody({ body, thread, task, lastPeerLine }: { body: string; thread
   }
   const why = notWokenReason(body);
   if (why === 'thread_capped' && thread.status === 'capped' && thread.cap_raises === 0)
-    return <>{body} <button type="button" className={btn} onClick={async () => { await api(`/api/threads/${thread.id}`, { body: { action: 'raise_cap' } }); await refresh(); toast('Cap raised. Reply in the thread to wake the director.'); }}>Raise cap</button></>;
+    return <>{body} <button type="button" className={btn} onClick={async () => { try { await api(`/api/threads/${thread.id}`, { body: { action: 'raise_cap' } }); await refresh(); toast('Cap raised. Reply in the thread to wake the director.'); } catch (e: any) { toast(e.hint || e.code, 'error'); } }}>Raise cap</button></>;
   if (why === 'thread_closed' && thread.status === 'closed')
-    return <>{body} <button type="button" className={btn} onClick={async () => { await api(`/api/threads/${thread.id}`, { body: { action: 'reopen' } }); await refresh(); toast('Thread reopened. Reply in the thread to wake the director.'); }}>Reopen thread</button></>;
+    return <>{body} <button type="button" className={btn} onClick={async () => { try { await api(`/api/threads/${thread.id}`, { body: { action: 'reopen' } }); await refresh(); toast('Thread reopened. Reply in the thread to wake the director.'); } catch (e: any) { toast(e.hint || e.code, 'error'); } }}>Reopen thread</button></>;
   const peer = peerNotStartedAgent(body);
-  if (peer && lastPeerLine && task && task.status === 'blocked' && task.blocked_reason === 'help' && task.help_agent_id === peer)
+  if (peer && lastPeerLine && peerQueued && task && task.status === 'blocked' && task.blocked_reason === 'help' && task.help_agent_id === peer)
     return <>{body} <button type="button" className={btn} onClick={async () => {
       try { await api(`/api/tasks/${task.id}`, { body: { action: 'reroute_help' } }); await refresh(); } catch (e: any) { toast(e.code === 'help_running' ? `${peer} is answering right now` : (e.hint || e.code), 'error'); } }}>Ask the director instead</button></>;
   return <>{body}</>;
@@ -79,6 +79,7 @@ function ThreadPane({ id }: { id: number }) {
   const sys = data.messages.filter((m: any) => m.author_kind === 'system').length;
   const pct = (a: number, b: number) => a / b >= 0.8;
   const lastPeerIdx = data.messages.reduce((acc: number, m: any, i: number) => m.author_kind === 'system' && peerNotStartedAgent(m.body) ? i : acc, -1);
+  const peerQueued = !!task && !!task.help_agent_id && (data.queued_help ?? []).includes(task.help_agent_id);
   const threadAct = async (action: string) => {
     const r: any = await api(`/api/threads/${id}`, { body: { action } }); await refresh();
     const tk = task ? `T-${task.id}` : '';
@@ -109,7 +110,7 @@ function ThreadPane({ id }: { id: number }) {
       </div>
       <ol className="p-3 space-y-3" aria-live="polite" data-nav-list="messages">
         {data.messages.map((m: any, i: number) => m.author_kind === 'system'
-          ? ((showSys || systemLineHasAction(m.body)) && <li key={m.id} tabIndex={0} className="text-xs text-slate-400 focus:outline focus:outline-2 focus:outline-sky-400"><span aria-hidden>▸</span> system · <Time t={m.created_at} now={boot.now} /> <SystemBody body={m.body} thread={th} task={task} lastPeerLine={lastPeerIdx === i} /></li>)
+          ? ((showSys || systemLineHasAction(m.body)) && <li key={m.id} tabIndex={0} className="text-xs text-slate-400 focus:outline focus:outline-2 focus:outline-sky-400"><span aria-hidden>▸</span> system · <Time t={m.created_at} now={boot.now} /> <SystemBody body={m.body} thread={th} task={task} lastPeerLine={lastPeerIdx === i} peerQueued={peerQueued} /></li>)
           : <li key={m.id} tabIndex={0} className={`focus:outline focus:outline-2 focus:outline-sky-400 ${m.kind === 'help' ? 'border-l-2 border-amber-400 pl-2' : ''}`}>
               <div className="text-xs text-slate-400"><span className="font-semibold text-slate-200">{roleChip(m)}</span>{msgChip(m) ? ` (${msgChip(m)})` : ''} · <Time t={m.created_at} now={boot.now} /></div>
               <div className="text-sm whitespace-pre-wrap">{m.body}</div>

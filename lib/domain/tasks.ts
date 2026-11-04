@@ -366,4 +366,11 @@ export function peerHelpNotices(db: DB): void {
       .get(j.thread_id, j.created_at, `${j.agent_id} hasn't started: %`) as { body: string } | undefined;
     if (last?.body !== body) systemMessage(db, j.thread_id, body);
   }
+  // Once the peer help job begins running after a "hasn't started" line, say so once so that line is not left misleading.
+  for (const j of db.prepare(`SELECT j.agent_id, j.created_at, t.thread_id FROM jobs j JOIN tasks t ON t.id=j.task_id AND t.help_agent_id=j.agent_id
+      WHERE j.kind='help' AND j.status='running' AND t.status='blocked' AND t.blocked_reason='help' AND j.agent_id<>'director'`).all() as { agent_id: string; created_at: number; thread_id: number }[]) {
+    const waited = db.prepare(`SELECT 1 FROM messages WHERE thread_id=? AND author_kind='system' AND created_at >= ? AND body LIKE ?`).get(j.thread_id, j.created_at, `${j.agent_id} hasn't started: %`);
+    const done = db.prepare(`SELECT 1 FROM messages WHERE thread_id=? AND author_kind='system' AND created_at >= ? AND body = ?`).get(j.thread_id, j.created_at, `${j.agent_id} started`);
+    if (waited && !done) systemMessage(db, j.thread_id, `${j.agent_id} started`);
+  }
 }

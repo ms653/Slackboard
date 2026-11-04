@@ -180,7 +180,8 @@ export function threadView(id: number) {
   const spawn_queued = !!d.prepare(`SELECT 1 FROM jobs j WHERE j.thread_id=? AND j.agent_id='director' AND j.kind='respond' AND j.status='queued' AND j.trigger_message_id IS NULL
     AND EXISTS (SELECT 1 FROM approvals a WHERE a.thread_id=j.thread_id AND a.kind='spend' AND a.status='consumed' AND json_extract(a.payload,'$.action')='spawn_worker')`).get(id);
   const peer_help = task ? (d.prepare(`SELECT count(*) n FROM events WHERE type='help.requested' AND json_extract(payload,'$.task_id')=? AND json_extract(payload,'$.peer')=1`).get((task as any).id) as any).n as number : 0;
-  return { thread: th, messages, task, running, artifacts, spawn_queued, peer_help, preview: th.status === 'open' ? preview(id) : null };
+  const queued_help = task ? (d.prepare(`SELECT agent_id FROM jobs WHERE task_id=? AND kind='help' AND status='queued'`).all((task as any).id) as any[]).map((r) => r.agent_id as string) : [];
+  return { thread: th, messages, task, running, artifacts, spawn_queued, peer_help, queued_help, preview: th.status === 'open' ? preview(id) : null };
 }
 
 export function taskView(id: number) {
