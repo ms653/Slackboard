@@ -5,6 +5,7 @@ import { api } from './api';
 import { Composer } from './Composer';
 import { ActionButton, Dialog, NoteDialog, TaskStatus, Time, usd } from './ui';
 import { retryToast } from './NeedsYou';
+import { EDIT_BUDGET, budgetHitAgent, systemLineHasAction, reproposeDefault } from '../lib/systemLines';
 
 function useFetch<T>(url: string | null) {
   const rev = useStore((s) => s.rev);
@@ -35,6 +36,13 @@ function PaneShell({ title, children, footer }: { title: React.ReactNode; childr
   );
 }
 
+function SystemBody({ body }: { body: string }) {
+  const { openSettingsAgent } = useStore();
+  const agent = budgetHitAgent(body);
+  if (!agent) return <>{body}</>;
+  const i = body.indexOf(EDIT_BUDGET);
+  return <>{body.slice(0, i)}<button type="button" className="underline text-sky-300" onClick={() => openSettingsAgent({ agent, field: 'usd' })}>Edit budget</button>{body.slice(i + EDIT_BUDGET.length)}</>;
+}
 const roleChip = (m: any) => m.author_kind === 'user' ? 'you' : m.author_kind === 'system' ? 'system' : m.author_agent_id;
 
 function ThreadPane({ id }: { id: number }) {
@@ -78,7 +86,7 @@ function ThreadPane({ id }: { id: number }) {
       </div>
       <ol className="p-3 space-y-3" aria-live="polite" data-nav-list="messages">
         {data.messages.map((m: any) => m.author_kind === 'system'
-          ? (showSys && <li key={m.id} tabIndex={0} className="text-xs text-slate-400 focus:outline focus:outline-2 focus:outline-sky-400"><span aria-hidden>▸</span> system · <Time t={m.created_at} now={boot.now} /> {m.body}</li>)
+          ? ((showSys || systemLineHasAction(m.body)) && <li key={m.id} tabIndex={0} className="text-xs text-slate-400 focus:outline focus:outline-2 focus:outline-sky-400"><span aria-hidden>▸</span> system · <Time t={m.created_at} now={boot.now} /> <SystemBody body={m.body} /></li>)
           : <li key={m.id} tabIndex={0} className={`focus:outline focus:outline-2 focus:outline-sky-400 ${m.kind === 'help' ? 'border-l-2 border-amber-400 pl-2' : ''}`}>
               <div className="text-xs text-slate-400"><span className="font-semibold text-slate-200">{roleChip(m)}</span>{m.kind !== 'chat' ? ` (${m.kind})` : ''} · <Time t={m.created_at} now={boot.now} /></div>
               <div className="text-sm whitespace-pre-wrap">{m.body}</div>
@@ -108,15 +116,16 @@ function TaskPane({ id }: { id: number }) {
   const note = (title: string, label: string, confirm: string, action: string, required = true) =>
     setDlg(<NoteDialog title={title} label={label} confirm={confirm} required={required} onClose={() => setDlg(null)} onDone={async (n) => { const r = await post(action, n); if (action === 'unblock') toast(retryToast(r, id)); }} />);
   const enabledWorkers = boot.agents.filter((a: any) => a.role === 'worker' && a.enabled && !a.retired_at);
+  const reToId = reTo || reproposeDefault(t.assignee_agent_id, enabledWorkers) || '';
   const agentTop = t.created_by_kind === 'agent' && !t.parent_id;
   const cancel = () => setDlg(<Dialog title={`Cancel T-${id}?`} onClose={() => setDlg(null)}>
     <p className="text-sm mb-3">Queued runs are cancelled and a running agent is stopped.</p>
     {agentTop && enabledWorkers.length > 0 && <div className="mb-3 text-sm">
       <label htmlFor="re-to" className="block text-xs mb-1">Re-propose to</label>
-      <select id="re-to" className="input" value={reTo || t.assignee_agent_id || enabledWorkers[0].id} onChange={(e) => setReTo(e.target.value)}>
+      <select id="re-to" className="input" value={reToId} onChange={(e) => setReTo(e.target.value)}>
         {enabledWorkers.map((a: any) => <option key={a.id} value={a.id}>{a.display_name}</option>)}</select>
-      <div className="mt-2"><ActionButton label={`Cancel and ask the director to re-propose to ${reTo || t.assignee_agent_id || enabledWorkers[0].id}`} run={async () => {
-        const to = reTo || t.assignee_agent_id || enabledWorkers[0].id;
+      <div className="mt-2"><ActionButton label={`Cancel and ask the director to re-propose to ${reToId}`} run={async () => {
+        const to = reToId;
         await post('cancel'); setDlg(null); toast(`T-${id} cancelled`);
         set({ composerPrefill: `@director Re-propose T-${id} "${t.title}" assigned to ${to}.` }); setView('chat'); close(); }} /></div></div>}
     <div className="flex justify-end gap-2"><button className="btn bg-slate-700" onClick={() => setDlg(null)}>Keep</button>

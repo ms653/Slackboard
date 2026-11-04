@@ -224,6 +224,8 @@ function dispatch(db: DB, c: Caller, tool: string, input: any, pre: { cap?: Capt
     case 'spawn_worker': {
       if (c.role !== 'director' || c.kind !== 'respond') return rej('not_allowed_for_role', 'director respond jobs only');
       const usd = input.daily_usd ?? 2.0, jobs = input.daily_jobs ?? 10;
+      const skillNote = typeof input.skill_note === 'string' ? input.skill_note.trim() : '';
+      if (skillNote.length < 1 || skillNote.length > 500) return rej('validation_error', 'skill_note must be 1-500 non-blank characters');
       if (usd < WORK_CAP_USD) return rej('allowance_below_job_cap', 'one work run reserves $1.00');
       if ((db.prepare(`SELECT count(*) AS n FROM tool_calls WHERE job_id=? AND tool='spawn_worker' AND outcome='ok'`).get(c.jobId) as any).n >= 1)
         return rej('validation_error', 'at most 1 spawn_worker call per job');
@@ -232,7 +234,7 @@ function dispatch(db: DB, c: Caller, tool: string, input: any, pre: { cap?: Capt
         return rej('spawn_pending', 'a spawn request is already waiting for the user');
       if (activeWorkerIds(db).length >= MAX_WORKERS) return rej('worker_cap', 'assign to an existing worker or ask the user to retire one');
       const t = now();
-      const payload = { action: 'spawn_worker', name: input.name, skill_note: input.skill_note, model: 'sonnet', daily_usd: usd, daily_jobs: jobs };
+      const payload = { action: 'spawn_worker', name: input.name, skill_note: skillNote, model: 'sonnet', daily_usd: usd, daily_jobs: jobs };
       let aid: number;
       try {
         aid = Number(db.prepare(`INSERT INTO approvals(kind, requested_by_agent_id, job_id, thread_id, task_id, summary, payload, payload_hash, created_at, expires_at)

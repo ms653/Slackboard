@@ -39,6 +39,7 @@ export function createTask(db: DB, o: { title: string; description?: string; acc
   if (parent && ['proposed', 'done', 'cancelled'].includes(parent.status)) throw new DomainError('illegal_transition', 'parent is not active');
   if (parent && parent.parent_id) throw new DomainError('validation_error', 'max task depth is 1');
   if (!enabledWorkerIds(db).length) throw new DomainError('no_enabled_worker', 'Enable a worker in Settings');
+  if (o.assignee !== undefined && !enabledWorkerIds(db).includes(o.assignee)) throw new DomainError('unknown_assignee', 'assignee must be an active, enabled worker', 400);
   const assignee = o.assignee ?? fewestOpenWorker(db)!;
   const isAgent = o.by.kind === 'agent';
   const status = isAgent && !o.parentId ? 'proposed' : 'todo';

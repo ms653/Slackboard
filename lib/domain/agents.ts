@@ -49,7 +49,8 @@ export function parseSpawnPayload(p: any): SpawnPayload {
   const bad = (hint: string) => new DomainError('invalid_payload', hint, 400);
   if (!p || typeof p !== 'object' || p.action !== 'spawn_worker') throw bad('not a spawn_worker payload');
   if (typeof p.name !== 'string' || !NAME_RE.test(p.name) || RESERVED_NAMES.includes(p.name)) throw bad('name');
-  if (typeof p.skill_note !== 'string' || p.skill_note.length < 1 || p.skill_note.length > 500) throw bad('skill_note');
+  if (typeof p.skill_note !== 'string' || p.skill_note.trim().length < 1 || p.skill_note.trim().length > 500) throw bad('skill_note');
+  p = { ...p, skill_note: p.skill_note.trim() };
   if (p.model !== 'sonnet') throw bad('model');
   if (typeof p.daily_usd !== 'number' || !(p.daily_usd >= WORK_CAP_USD && p.daily_usd <= 3)) throw bad('daily_usd');
   if (!Number.isInteger(p.daily_jobs) || p.daily_jobs < 1 || p.daily_jobs > 20) throw bad('daily_jobs');

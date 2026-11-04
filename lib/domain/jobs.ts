@@ -25,7 +25,7 @@ export function kindSettings(role: string, kind: JobKind): KindSettings {
     if (kind === 'review') return { cwd: 'workspace', maxTurns: 6, budget: 0.40, builtins: ro, wallMs: 360_000,
       tools: ['post_message', 'update_task', 'add_note', 'request_help'] };
     return { cwd: 'agent', maxTurns: 8, budget: 0.40, builtins: ro, wallMs: 240_000,
-      tools: ['post_message', 'create_task', 'update_task', 'add_note', 'request_help', 'request_approval', 'spawn_worker'] };
+      tools: ['post_message', 'create_task', 'update_task', 'add_note', 'request_help', 'request_approval', ...(kind === 'respond' ? ['spawn_worker'] : [])] };
   }
   if (kind === 'work') return { cwd: 'workspace', maxTurns: 15, budget: 1.00, builtins: [...ro, 'Write', 'Edit'], wallMs: 900_000,
     tools: ['post_message', 'update_task', 'add_note', 'request_help'] };
