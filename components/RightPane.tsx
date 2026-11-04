@@ -288,7 +288,7 @@ function ReviewPane({ id }: { id: number }) {
   return (
     <PaneShell title={<>Review · T-{data.task_id} · round {data.review_round} of 2</>} footer={footer && <div className="shrink-0 border-t border-separator px-4 py-3 flex items-center gap-2 bg-content">{footer}</div>}
       actions={<button ref={expandBtn} className="btn btn-ghost btn-sm" aria-expanded={expanded} aria-keyshortcuts="x" onClick={toggle}><Icon as={expanded ? Minimize2 : Maximize2} size={14} />{expanded ? 'Collapse' : 'Expand'} <kbd aria-hidden className="kbd">x</kbd></button>}>
-      <div className="px-4 py-3 text-body space-y-2 material-bar">
+      <div className="px-4 py-3 text-body space-y-2 border-b border-separator">
         <p className="flex flex-wrap items-center gap-x-2 gap-y-1">Verdict: {verdict} <span className="text-caption text-fg-tertiary">Captured by server <Time t={data.created_at} now={boot.now} /></span></p>
         {data.verdict_note && <p className="whitespace-pre-wrap text-fg-secondary">Reviewer notes: &ldquo;{data.verdict_note}&rdquo;</p>}
       </div>

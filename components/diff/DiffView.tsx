@@ -248,20 +248,20 @@ export function DiffView({ data, show, setShow, reload, expanded, toggleExpand }
     <div ref={root} className="text-body">
       <div role="status" aria-live="polite" className="sr-only">{live}</div>
       <div ref={toolbar} className="sticky top-0 z-10 material-bar border-b border-separator px-4 py-2 flex flex-wrap items-center gap-x-4 gap-y-2">
-        <fieldset className="flex flex-wrap items-center gap-2"><legend className="sr-only">Show</legend><span className="text-callout text-fg-tertiary">Show:</span>
+        <fieldset className="flex flex-wrap items-center gap-2"><legend className="sr-only">Show</legend><span className="text-callout text-fg-secondary">Show:</span>
           <div className="seg flex-wrap h-auto">
           {sibs.map((s) => <label key={s.id} className={seg}><input type="radio" className="sr-only" name="dv-show" checked={show.kind === 'round' && show.id === s.id} onChange={() => setShow({ kind: 'round', id: s.id })} /> Round {s.round}{sibs.some((x) => x.cycle !== s.cycle) ? ` (cycle ${s.cycle})` : ''}</label>)}
           {pairs.map((p) => <label key={p.to.id} className={seg}><input type="radio" className="sr-only" name="dv-show" checked={show.kind === 'compare' && show.to === p.to.id && show.from === p.from.id} onChange={() => setShow({ kind: 'compare', from: p.from.id, to: p.to.id })} /> Changes since round {p.from.round} ({label(p.from, sibs)} → {label(p.to, sibs)})</label>)}
           </div>
         </fieldset>
-        <fieldset className="flex flex-wrap items-center gap-2"><legend className="sr-only">View</legend><span className="text-callout text-fg-tertiary">View:</span>
+        <fieldset className="flex flex-wrap items-center gap-2"><legend className="sr-only">View</legend><span className="text-callout text-fg-secondary">View:</span>
           <div className="seg">
           <label className={seg}><input type="radio" className="sr-only" name="dv-view" checked={mode === 'unified'} onChange={() => setView('unified')} /> Unified</label>
           <label className={seg}><input type="radio" className="sr-only" name="dv-view" checked={mode === 'split'} disabled={!canSplit} aria-describedby="dv-split-reason" onChange={() => setView('split')} /> Side by side</label>
           </div>
-          {!canSplit && <span id="dv-split-reason" className="text-caption text-fg-tertiary">— {splitReason}</span>}
+          {!canSplit && <span id="dv-split-reason" className="text-caption text-fg-secondary">— {splitReason}</span>}
         </fieldset>
-        {commentNote && !compare && <p className="w-full flex items-center gap-1.5 text-caption text-fg-tertiary"><Icon as={MessageSquare} size={14} />{commentNote}</p>}
+        {commentNote && !compare && <p className="w-full flex items-center gap-1.5 text-caption text-fg-secondary"><Icon as={MessageSquare} size={14} />{commentNote}</p>}
       </div>
       {compare && cmp.data && <div className="px-4 py-2 border-b border-separator">
         <h4 className="text-callout font-semibold">Round {cmpFrom?.round} requests ({requests.length}, read-only)</h4>
