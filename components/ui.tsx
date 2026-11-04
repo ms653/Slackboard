@@ -111,7 +111,7 @@ export function Dialog({ title, children, onClose, wide, hideTitle }: { title: s
     <div className={`fixed inset-0 z-50 ${wide ? 'bg-black/10 dark:bg-black/40' : 'bg-black/25 dark:bg-black/50'} flex justify-center items-end md:items-start md:px-4 md:pt-[18vh] anim-in`}
       onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
       <div ref={ref} role="dialog" aria-modal="true" aria-labelledby="dlg-title"
-        className={`anim-dialog w-full ${wide ? 'md:max-w-[560px] md:pt-0 p-0 overflow-hidden bg-elevated/[.94] backdrop-blur-[30px] saturate-[180%]' : 'md:max-w-[440px] bg-elevated p-5'} shadow-lg rounded-t-2xl md:rounded-xl max-md:pb-[calc(20px+env(safe-area-inset-bottom))] max-h-[85vh] overflow-y-auto`}>
+        className={`anim-dialog w-full ${wide ? 'md:max-w-[560px] md:pt-0 p-0 overflow-hidden bg-elevated' : 'md:max-w-[440px] bg-elevated p-5'} shadow-lg rounded-t-2xl md:rounded-xl max-md:pb-[calc(20px+env(safe-area-inset-bottom))] max-h-[85vh] overflow-y-auto`}>
         <div className="mx-auto mb-3 h-1 w-9 rounded-full bg-separator-strong md:hidden" aria-hidden />
         <h2 id="dlg-title" className={hideTitle ? 'sr-only' : 'text-headline mb-2'}>{title}</h2>
         {children}

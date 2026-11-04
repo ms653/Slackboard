@@ -34,7 +34,7 @@ export function Chat() {
             <li key={th.id} className="flex items-center gap-2 px-5 py-1 text-callout text-fg-tertiary">
               <Icon as={tk ? STATUS_ICON(tk.status) : MessageSquare} size={14} className={tk ? STATUS_ICON_CLS(tk.status) : ''} />
               <span className="min-w-0 truncate">{th.first_body ?? th.title}</span>
-              <button className="btn btn-link text-callout shrink-0" onClick={() => open({ kind: 'thread', id: th.id })}>Open thread</button>
+              <button className="btn btn-link text-callout shrink-0" aria-label={`Open thread: ${th.first_body ?? th.title}`} onClick={() => open({ kind: 'thread', id: th.id })}>Open thread</button>
             </li>);
           return (
           <li key={th.id} className="group flex gap-3 px-5 py-1.5 hover:bg-fill/60 transition-colors duration-fast">
@@ -138,7 +138,7 @@ export function Board({ now }: { now: number }) {
         <button className="btn btn-primary btn-sm" onClick={() => open({ kind: 'newtask' })}><Icon as={Plus} size={14} />New task</button>
         <label className="text-callout text-fg-secondary inline-flex items-center gap-2 ml-auto"><input type="checkbox" className="checkbox" checked={showCancelled} onChange={(e) => setShowCancelled(e.target.checked)} /> Show cancelled</label>
       </div>
-      <div ref={scroller} className={`flex-1 min-h-0 overflow-x-auto flex gap-3 px-5 py-4 max-md:px-4 max-md:snap-x max-md:snap-mandatory ${overflowing ? '[mask-image:linear-gradient(to_right,#000_calc(100%-24px),transparent)]' : ''}`}>
+      <div ref={scroller} className={`flex-1 min-h-0 overflow-x-auto flex gap-3 px-5 py-4 max-md:px-4 max-md:snap-x max-md:snap-mandatory ${overflowing ? '[mask-image:linear-gradient(to_right,#000_calc(100%-40px),transparent)]' : ''}`}>
         {cols.map(([k, l]) => {
           let ts = boot.tasks.filter((t: any) => t.status === k);
           const total = ts.length;

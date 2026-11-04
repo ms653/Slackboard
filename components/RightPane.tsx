@@ -246,7 +246,7 @@ function TaskPane({ id }: { id: number }) {
               <td className="pr-3">{j.kind} · {j.agent_id}</td><td className="pr-3 tabular-nums text-fg-secondary">attempt {j.attempts}/{j.max_attempts}</td>
               <td className="pr-3"><span className="inline-flex items-center gap-1"><span className={jc}><Icon as={JI} size={14} /></span> {j.status}{j.failure_kind ? ` (${j.failure_kind})` : ''}</span></td>
               <td className="text-right tabular-nums text-fg-secondary">{j.status === 'running' ? `cap ${usd(j.budget_cap_usd)}` : `${usd(j.cost_usd)} est.`}</td></tr>
-            {hasActions && <tr className="border-b border-separator"><td colSpan={4} className="pb-2"><span className="inline-flex gap-1 items-center">
+            {hasActions && <tr className="border-b border-separator"><td colSpan={4} className="pb-2 text-right"><span className="inline-flex gap-1 items-center">
                 {['queued', 'running'].includes(j.status) && <ActionButton small label="Cancel job" run={async () => cancelJob(j)} />}
                 {j.status === 'queued' && j.attempts > 0 && <ActionButton small label="Retry now" run={async () => { await api(`/api/jobs/${j.id}`, { body: { action: 'retry_now' } }); await refresh(); }} />}
                 {j.attempts > 0 && <button className="btn btn-link text-callout" onClick={() => open({ kind: 'log', id: j.id })}>Open log</button>}
