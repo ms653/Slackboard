@@ -5,7 +5,7 @@ import type { DiffLine } from '../../lib/domain/diff';
 export interface Comment { id: number; author_agent_id: string | null; body: string; path: string; line: number; side: 'old' | 'new'; delivery: { state: 'pending' | 'sent' | 'closed'; job_id?: number; reason?: string } }
 export const authorOf = (c: Pick<Comment, 'author_agent_id'>) => c.author_agent_id ?? 'you';
 export const deliveryText = (d: Comment['delivery']) => d.state === 'sent' ? `Sent to worker run #${d.job_id}`
-  : d.state === 'pending' ? "Will be sent with the worker's next run" : d.reason === 'over_limit' ? 'Not sent: over the 50-comment limit per run' : 'Not sent: round closed';
+  : d.state === 'pending' ? "Will be sent with the worker's next run" : d.reason === 'over_limit' ? 'Not sent: over the per-run limit' : 'Not sent: round closed';
 
 export function CommentItem({ c, readOnlyLabel }: { c: Comment; readOnlyLabel?: boolean }) {
   return (

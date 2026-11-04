@@ -12,6 +12,7 @@
     "doctor": "node dist/orchestrator/main.js --doctor-only",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
+    "test:a11y": "node test/playwright/diff-keyboard.mjs",
     "test:e2e": "(test -f .next/BUILD_ID || next build) && npm run build:orch && vitest run -c vitest.e2e.config.ts"
   },
   "dependencies": {

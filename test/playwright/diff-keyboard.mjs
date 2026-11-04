@@ -1,10 +1,16 @@
 // Keyboard-only check of the diff view (PHASE2 §T9). Usage: node test/playwright/diff-keyboard.mjs  (needs a prior `npm run build`)
-import { chromium } from '/opt/node22/lib/node_modules/playwright/index.mjs';
+import { createRequire } from 'node:module';
 import { spawn, execFileSync } from 'node:child_process';
 import fs from 'node:fs'; import os from 'node:os'; import path from 'node:path'; import net from 'node:net';
 import Database from 'better-sqlite3';
 import assert from 'node:assert/strict';
 
+// Playwright module: PLAYWRIGHT_PATH (dir or index file), else `playwright` resolved from the repo / NODE_PATH, else the sandbox's global install.
+const req = createRequire(import.meta.url);
+const pwCandidates = [process.env.PLAYWRIGHT_PATH, 'playwright', ...(process.env.NODE_PATH ?? '').split(path.delimiter).filter(Boolean).map((d) => path.join(d, 'playwright')), '/opt/node22/lib/node_modules/playwright'].filter(Boolean);
+let pw; for (const c of pwCandidates) { try { pw = req(c); break; } catch {} }
+if (!pw) { console.error('Playwright not found. Set PLAYWRIGHT_PATH to its install directory (tried: ' + pwCandidates.join(', ') + ')'); process.exit(2); }
+const { chromium } = pw;
 const REPO = path.resolve(path.dirname(new URL(import.meta.url).pathname), '../..');
 const home = fs.mkdtempSync(path.join(os.tmpdir(), 'sb-pw-'));
 const env = { ...process.env, SLACKBOARD_HOME: home, SB_SESSION_TOKEN: 'pw-token' };
@@ -19,7 +25,10 @@ let browser;
 const cleanup = async () => { try { await browser?.close(); } catch {} try { process.kill(srv.pid, 'SIGTERM'); } catch {} };
 try {
   for (let i = 0; i < 200 && !/Ready|started server/i.test(log); i++) await new Promise((r) => setTimeout(r, 300));
-  browser = await chromium.launch({ executablePath: '/usr/bin/google-chrome', args: ['--no-sandbox'] });
+  // Browser: CHROME_PATH, else chromium's bundled browser when installed, else the system Chrome.
+  const bundled = (() => { try { const p = chromium.executablePath(); return p && fs.existsSync(p) ? p : null; } catch { return null; } })();
+  const chrome = process.env.CHROME_PATH || (bundled ? undefined : '/usr/bin/google-chrome');
+  browser = await chromium.launch({ ...(chrome ? { executablePath: chrome } : {}), args: ['--no-sandbox'] });
   const page = await browser.newPage({ viewport: { width: 1400, height: 900 } });
   await page.addInitScript(() => { try { localStorage.removeItem('sb.diffView'); } catch {} });
   await page.goto(`http://127.0.0.1:${port}/`);
@@ -128,6 +137,39 @@ try {
   await page.setViewportSize({ width: 800, height: 800 }); await page.waitForTimeout(300);
   assert.match(await page.locator('#dv-split-reason').innerText(), /needs a window at least 900 px wide/);
   void same;
+  // PM-1 (P2-S8 c2): worker running -> [+ Comment] disabled with the reason; `c` announces and opens nothing
+  await page.setViewportSize({ width: 1400, height: 900 });
+  const wdb = () => new Database(path.join(home, dbfile));
+  { const d = wdb(); try { d.prepare(`UPDATE tasks SET status='in_progress' WHERE id=?`).run(seeded.task_id); } finally { d.close(); } }
+  await page.reload(); await page.locator('nav[aria-label="Workspace"]').waitFor(); await page.waitForTimeout(500);
+  await page.keyboard.press('g'); await page.keyboard.press('b');
+  const card2 = page.locator('[data-task-card]').first(); await card2.waitFor(); await card2.focus();
+  await page.keyboard.press('d'); await page.locator('aside h2:has-text("Review · T-")').waitFor();
+  await page.locator('text=Worker is running; comment after it submits').first().waitFor();
+  const cb = page.locator('button:has-text("+ Comment")').first();
+  assert.ok(await cb.isDisabled(), '+ Comment disabled while the worker runs');
+  await page.locator('[data-cell]').first().focus(); await page.keyboard.press('c');
+  assert.equal(await page.locator('textarea').count(), 0, 'no composer while the worker runs');
+  assert.equal(await live(), 'Worker is running; comment after it submits');
+  // compare view: round 2 artifact on a real second commit; "Round 1 requests" is read-only
+  {
+    const a1 = q(`SELECT * FROM artifacts WHERE task_id=?`, seeded.task_id)[0];
+    const g = (...a) => execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', '-c', 'commit.gpgsign=false', `--git-dir=${path.join(home, 'git', `T-${seeded.task_id}.git`)}`, `--work-tree=${path.join(home, 'workspaces', `T-${seeded.task_id}`)}`, ...a], { encoding: 'utf8' }).trim();
+    fs.appendFileSync(path.join(home, 'workspaces', `T-${seeded.task_id}`, 'docs/INSTALL.md'), 'round two\n');
+    g('add', '-A', '--force'); g('commit', '-q', '-m', 'round 2'); const head2 = g('rev-parse', 'HEAD');
+    const d = wdb();
+    try { d.prepare(`UPDATE tasks SET status='in_review' WHERE id=?`).run(seeded.task_id);
+      d.prepare(`INSERT INTO artifacts(task_id, review_cycle, review_round, base_commit, head_commit, diff_path, files, lines_added, lines_removed, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)`)
+        .run(seeded.task_id, a1.review_cycle, 2, a1.base_commit, head2, a1.diff_path, a1.files, a1.lines_added, a1.lines_removed, Date.now()); } finally { d.close(); }
+  }
+  await page.reload(); await page.locator('nav[aria-label="Workspace"]').waitFor(); await page.waitForTimeout(500);
+  await page.keyboard.press('g'); await page.keyboard.press('b');
+  const card3 = page.locator('[data-task-card]').first(); await card3.waitFor(); await card3.focus();
+  await page.keyboard.press('d'); await page.locator('aside h2:has-text("Review · T-")').waitFor();
+  await page.locator('label:has-text("Changes since round 1")').click();
+  const reqH = page.locator('h4:has-text("Round 1 requests")'); await reqH.waitFor();
+  assert.match(await reqH.innerText(), /^Round 1 requests \(\d+, read-only\)$/);
+  assert.equal(await page.locator('button:has-text("+ Comment")').count(), 0, 'no [+ Comment] in compare');
   console.log('PLAYWRIGHT OK');
 } catch (e) { console.error('PLAYWRIGHT FAIL', e); console.error(log.slice(-1500)); process.exitCode = 1; }
 finally { await cleanup(); console.log('stopped next pid', srv.pid); }

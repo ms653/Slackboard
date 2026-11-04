@@ -283,6 +283,19 @@ describe('increment 2 review fixes carried into this pass', () => {
     expect([t.status, t.blocked_reason, t.help_agent_id]).toEqual(['blocked', 'help', 'director']);
     expect(db.prepare(`SELECT count(*) n FROM jobs WHERE task_id=? AND kind='help' AND agent_id='director' AND status='queued'`).get(tid)).toEqual({ n: 1 });
   });
+  it('T11b does not fire for a killed peer help job (J15): no director help job while kill_switch=1', () => {
+    const db = freshEnv(); addWorker(db, 'writer2'); db.prepare(`UPDATE system_state SET max_concurrency=4`).run();
+    const tid = tx(db, () => createTask(db, { title: 'A', description: 'd', acceptance: 'a', assignee: 'worker', by: { kind: 'user' } })).task_id;
+    const wa = claim(db)!;
+    callTool(db, caller(wa, 'worker'), 'request_help', { question: 'q', target_agent: 'writer2' });
+    tx(db, () => finishAttempt(db, wa.id, ok, ME));
+    const hj = claim(db)!; expect(hj.agent_id).toBe('writer2');
+    callTool(db, caller(hj, 'worker'), 'request_help', { question: 'cannot answer' });
+    db.prepare(`UPDATE system_state SET kill_switch=1`).run();
+    expect(tx(db, () => finishAttempt(db, hj.id, { exitCode: 143, killedFor: 'kill' } as any, ME))!.rule).toBe('J15');
+    expect(db.prepare(`SELECT count(*) n FROM jobs WHERE task_id=? AND kind='help' AND agent_id='director'`).get(tid)).toEqual({ n: 0 });
+    expect(getTask(db, tid)!.help_agent_id).not.toBe('director');
+  });
   it('wrong_task hint for a job with no task says "omit task_id"', () => {
     const db = freshEnv();
     const th = tx(db, () => createThread(db, 'x', { kind: 'user' }));

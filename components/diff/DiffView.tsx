@@ -71,7 +71,8 @@ export function DiffView({ data, show, setShow, reload, expanded, toggleExpand }
   const hunkNo = (h: DiffHunk) => flatHunks.findIndex((x) => x.h === h) + 1;
   const placed = new Set<number>();
   const byKey = new Map<string, Comment[]>();
-  comments.forEach((c) => { if (anchorInDiff(files, c.path, c.side, c.line)) { placed.add(c.id); const k = `${c.path}|${c.side}|${c.line}`; byKey.set(k, [...(byKey.get(k) ?? []), c]); } });
+  const shownFiles = useMemo(() => view.map((v) => ({ ...v.f, hunks: v.hunks })), [view]);   // only what is rendered (the 500-line cut hides the rest)
+  comments.forEach((c) => { if (anchorInDiff(shownFiles, c.path, c.side, c.line)) { placed.add(c.id); const k = `${c.path}|${c.side}|${c.line}`; byKey.set(k, [...(byKey.get(k) ?? []), c]); } });
   const unplaced = comments.filter((c) => !placed.has(c.id));
 
   const firstKey = useMemo(() => {
@@ -224,7 +225,7 @@ export function DiffView({ data, show, setShow, reload, expanded, toggleExpand }
               className="px-3 text-xs text-sky-300 outline-none focus:ring-2 focus:ring-sky-400">Hunk {n} of {flatHunks.length} · lines {a}–{b}{h.section ? ` · ${h.section}` : ''}</h4>
             <div className="overflow-x-auto">{mode === 'unified' ? <UnifiedHunk hunk={h} ctx={ctxFor(f, h)} /> : <SplitHunk hunk={h} ctx={ctxFor(f, h)} />}</div>
           </div>); })}
-        {cut && <p className="px-3 text-xs">Showing the first {LIMIT_LINES} lines. <button className="underline" onClick={() => setFull(new Set([...full, f.path]))}>Show full file</button></p>}
+        {cut && <p className="px-3 text-xs">Showing the first {LIMIT_LINES} lines{(() => { const n = comments.filter((c) => c.path === f.path && !placed.has(c.id)).length; return n ? ` · ${n} comment${n === 1 ? '' : 's'} in hidden lines` : ''; })()}. <button className="underline" onClick={() => setFull(new Set([...full, f.path]))}>Show full file</button></p>}
       </section>))}
     {unplaced.length > 0 && <div className="px-3"><h4 className="text-xs font-semibold">Comments on lines not shown</h4>{unplaced.map((c) => <div key={c.id}><p className="text-xs text-slate-300">{c.path}</p><CommentItem c={c} /></div>)}</div>}
   </div>;
